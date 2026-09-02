@@ -33,6 +33,10 @@ from picard.ui.itemviews.custom_columns.protocols import (
 )
 from picard.ui.itemviews.custom_columns.registry import registry
 from picard.ui.itemviews.events import header_events
+from picard.ui.match_icons import (
+    load_match_icons,
+    match_icons,
+)
 
 
 # Ordered worst-to-best so tier index doubles as a sort key.
@@ -45,15 +49,6 @@ FAKE_FLAGS = {
     "Good": "",
     "Great": "",
     "Excellent": "",
-}
-
-TIER_COLORS = {
-    "Bad": QtGui.QColor("#c0392b"),
-    "Poor": QtGui.QColor("#e67e22"),
-    "Ok": QtGui.QColor("#b7950b"),
-    "Good": QtGui.QColor("#27ae60"),
-    "Great": QtGui.QColor("#1e8449"),
-    "Excellent": QtGui.QColor("#196f3d"),
 }
 
 
@@ -141,18 +136,16 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         info = self._get_info(index)
         if not info:
             return
-        color = TIER_COLORS.get(info['tier'], option.palette.text().color())
-        painter.save()
-        painter.setPen(QtGui.QPen(color))
-        font = painter.font()
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(
-            option.rect.adjusted(4, 0, -4, 0),
-            int(QtCore.Qt.AlignmentFlag.AlignVCenter),
-            info['tier'],
-        )
-        painter.restore()
+        try:
+            level = TIERS.index(info['tier'])
+        except ValueError:
+            return
+        icon = match_icons[level]
+        icon_size = 16
+        icon_margin = 2
+        x = option.rect.x() + icon_margin
+        y = option.rect.y() + (option.rect.height() - icon_size) // 2
+        icon.paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
 
     def helpEvent(
         self,
@@ -194,6 +187,10 @@ def enable(api: PluginApi) -> None:
     """Called when the plugin is enabled."""
     api.logger.info("File Health (demo) enabled")
 
+    # Picard's own match_icons list is populated lazily; Picard core likely
+    # already loaded it, but don't rely on load order — reusing Picard's
+    # own bookmark icons (not new plugin-bundled assets) needs this.
+    load_match_icons()
     api.register_script_variable(
         '_health_tier',
         documentation="Demo-only fake health tier (Bad..Excellent).",
@@ -213,7 +210,14 @@ def enable(api: PluginApi) -> None:
     # checked in the header menu, but never actually renders — the tree
     # widget's Qt column count is fixed at construction and isn't rebuilt
     # just by mutating the shared columns list or toggling visibility.
-    header_events.headers_updated.emit()
+    #
+    # Deferred by one event-loop tick (singleShot(0, ...)) rather than
+    # emitted immediately: enable() runs synchronously during startup, and
+    # whether MainWindow's tree views already exist (and are already
+    # connected to this signal) at that exact point is not guaranteed —
+    # an immediate emit with zero listeners connected yet is a silent
+    # no-op, not queued for later delivery.
+    QtCore.QTimer.singleShot(0, header_events.headers_updated.emit)
 
 
 def disable() -> None:
