@@ -173,15 +173,6 @@ class CompareResultsPanel(QtWidgets.QDialog):
         self.tree.itemDoubleClicked.connect(lambda *_: self._show_in_list())
         layout.addWidget(self.tree)
 
-        caption = QtWidgets.QLabel(
-            "Bold rows scored higher on the checks we ran for that group — "
-            "not a directive, just what the data shows. Double-click a row "
-            "to find it in the file/album list.",
-            self,
-        )
-        caption.setWordWrap(True)
-        layout.addWidget(caption)
-
         action_row = QtWidgets.QHBoxLayout()
         self.show_button = QtWidgets.QPushButton("Show in List", self)
         self.show_button.clicked.connect(self._show_in_list)
