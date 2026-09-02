@@ -154,8 +154,10 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         issues = info['issues']
         if issues:
             items = "".join(f"<li>{issue}</li>" for issue in issues)
-            return f"<b>{tier}</b><ul style='margin-left:-20px;'>{items}</ul>"
-        return f"<b>{tier}</b><br>No issues detected"
+            body = f"<b>{tier}</b><ul style='margin-left:-20px;'>{items}</ul>"
+        else:
+            body = f"<b>{tier}</b><br>No issues detected"
+        return f"<div style='white-space:nowrap;'>{body}</div>"
 
     def helpEvent(
         self,
