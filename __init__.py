@@ -28,6 +28,7 @@ from PyQt6 import (
 from picard import tagger_instance
 from picard.file import File
 from picard.item import Item
+from picard.track import Track
 from picard.plugin3.api import (
     BaseAction,
     PluginApi,
@@ -118,30 +119,21 @@ class ScanHealthAction(BaseAction):
             )
 
 
-def _identity_key(file: File) -> str | None:
-    """Best available "same recording" signal for a file.
+def _group_by_track(files: list[File]) -> dict[Track, list[File]]:
+    """Group files by the Track Picard has already matched them to.
 
-    Prefers AcoustID (audio-fingerprint match, set after Scan/AcoustID
-    lookup) over the MusicBrainz recording MBID (set after a plain
-    metadata Lookup) — AcoustID is evidence about the actual audio content,
-    the recording MBID is evidence about the tag-matched identity, which is
-    weaker but still meaningful for grouping.
+    Deliberately not re-deriving "same recording" from tags (AcoustID,
+    recording MBID) — Picard already decided which files belong to the
+    same track, using its own configured match_min_similarity/margin
+    thresholds during Lookup/Scan. Reusing that decision means we never
+    disagree with what the user already sees grouped together in the
+    main window, and never need our own separate confidence threshold.
     """
-    acoustid = file.metadata['acoustid_id']
-    if acoustid:
-        return f"acoustid:{acoustid}"
-    recording_id = file.metadata['musicbrainz_recordingid']
-    if recording_id:
-        return f"recording:{recording_id}"
-    return None
-
-
-def _group_by_identity(files: list[File]) -> dict[str, list[File]]:
-    groups: dict[str, list[File]] = {}
+    groups: dict[Track, list[File]] = {}
     for file in files:
-        key = _identity_key(file)
-        if key:
-            groups.setdefault(key, []).append(file)
+        parent = getattr(file, 'parent_item', None)
+        if isinstance(parent, Track):
+            groups.setdefault(parent, []).append(file)
     return groups
 
 
@@ -308,40 +300,92 @@ class CompareResultsPanel(QtWidgets.QDialog):
             self._remove_row_for(file)
 
 
-class CompareHealthAction(BaseAction):
-    """Right-click action that compares files sharing the same recording.
+def _all_loaded_files() -> list[File]:
+    """Every file currently in Picard: unclustered, in a cluster, or matched
+    into an album track. Lets the library-wide compare action find every
+    duplicate-track group without the user hand-picking files first.
+    """
+    tagger = tagger_instance()
+    files = list(tagger.unclustered_files.files)
+    for cluster in tagger.clusters:
+        files.extend(cluster.files)
+    for album in tagger.albums.values():
+        for track in album.tracks:
+            files.extend(track.files)
+    return files
 
-    Groups the selection by AcoustID (falling back to the MusicBrainz
-    recording MBID) and opens a non-modal panel listing every file's tier
-    and issues per group, side by side. Doesn't declare a hard winner —
-    only bolds whichever file scored higher within its group, as a subtle
-    cue, leaving the actual decision to the user. Matches the design
-    decided earlier: a perceptual-distance metric like ViSQOL/Zimtohrli
-    would tell you the files differ, but not which one is better; the
-    directional gate-field reasons (what FAKE_ISSUES stands in for here)
-    are what actually inform that judgment.
+
+def _track_label(track: Track) -> str:
+    title = track.metadata['title'] or "Unknown title"
+    artist = track.metadata['artist']
+    return f"{artist} – {title}" if artist else title
+
+
+def _open_compare_panel(files: list[File], parent: QtWidgets.QWidget) -> CompareResultsPanel | None:
+    """Groups by Track (Picard's own matching decision, not our own tag
+    comparison), opens the panel if there's anything to compare.
+    """
+    groups = {track: group for track, group in _group_by_track(files).items() if len(group) > 1}
+    if not groups:
+        return None
+    panel = CompareResultsPanel(parent)
+    for track, group in groups.items():
+        panel.add_group(_track_label(track), group)
+    panel.show()
+    return panel
+
+
+class CompareHealthAction(BaseAction):
+    """Right-click action that compares files Picard has matched to the
+    same track, within the current selection.
+
+    Grouping reuses Picard's own matching decision (which track a file is
+    linked to, decided via its configured match_min_similarity/margin
+    thresholds) rather than a separate tag-based identity check — if
+    Picard considers two files the same recording, so do we, and never
+    disagrees with what the main window already shows grouped together.
+
+    Doesn't declare a hard winner in the results — only bolds whichever
+    file scored higher within its group, as a subtle cue, leaving the
+    actual decision to the user. Matches the design decided earlier: a
+    perceptual-distance metric like ViSQOL/Zimtohrli would tell you the
+    files differ, but not which one is better; the directional gate-field
+    reasons (what FAKE_ISSUES stands in for here) are what actually
+    inform that judgment.
     """
 
     TITLE = "Compare File Health (Demo)…"
 
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
-        groups = {key: group for key, group in _group_by_identity(files).items() if len(group) > 1}
         window = tagger_instance().window
-        if not groups:
+        panel = _open_compare_panel(files, window)
+        if panel is None:
             window.set_statusbar_message(
-                "No two selected files share the same AcoustID or recording.",
+                "None of the selected files are matched to the same track.",
                 echo=None,
             )
             return
+        self._panel = panel
 
-        panel = CompareResultsPanel(window)
-        for key, group in groups.items():
-            panel.add_group(key, group)
-        panel.show()
-        # Keep a reference so the panel isn't garbage-collected once
-        # callback() returns — the action instance persists for the
-        # app's lifetime as a registered menu action.
+
+class CompareAllHealthAction(BaseAction):
+    """Tools-menu action: compares every matched-duplicate track across the
+    entire loaded library at once — the "many files" case, not limited to
+    a manual selection.
+    """
+
+    TITLE = "Compare All File Health (Demo)…"
+
+    def callback(self, objs) -> None:
+        window = tagger_instance().window
+        panel = _open_compare_panel(_all_loaded_files(), window)
+        if panel is None:
+            window.set_statusbar_message(
+                "No tracks in the library currently have more than one matched file.",
+                echo=None,
+            )
+            return
         self._panel = panel
 
 
@@ -523,6 +567,7 @@ def enable(api: PluginApi) -> None:
     api.register_file_action(CompareHealthAction)
     api.register_track_action(CompareHealthAction)
     api.register_cluster_action(CompareHealthAction)
+    api.register_tools_menu_action(CompareAllHealthAction)
 
     # Force any already-open tree views to rebuild their header (column
     # count + labels) and recompute every existing row's cell text for the
