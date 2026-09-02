@@ -1,0 +1,8 @@
+uuid = "e9df52ff-636f-45cb-8020-c8dbb71991fb"
+name = "File Health"
+description = "A Picard plugin"
+api = ["3.0"]
+authors = ["Demo"]
+categories = ["metadata"]
+# homepage = "https://github.com/username/plugin-name"
+# report_bugs_to = "https://your.plugin.bugtracker/issues"
