@@ -17,15 +17,21 @@ signal analysis (clipping, spectral cutoff, LUFS, etc.) once the demo is
 validated.
 """
 
+import time
+
 from PyQt6 import (
     QtCore,
     QtGui,
     QtWidgets,
 )
 
+from picard import tagger_instance
 from picard.file import File
 from picard.item import Item
-from picard.plugin3.api import PluginApi
+from picard.plugin3.api import (
+    BaseAction,
+    PluginApi,
+)
 from picard.ui.itemviews.custom_columns.factory import make_delegate_column
 from picard.ui.itemviews.custom_columns.protocols import (
     ColumnValueProvider,
@@ -37,6 +43,8 @@ from picard.ui.match_icons import (
     load_match_icons,
     match_icons,
 )
+from picard.util import iter_files_from_objects
+from picard.util.thread import run_task
 
 
 # Ordered worst-to-best so tier index doubles as a sort key.
@@ -64,11 +72,50 @@ def _fake_health_for(filename: str) -> tuple[str, str]:
     return tier, "; ".join(FAKE_ISSUES[tier])
 
 
-def _apply_fake_health(api: PluginApi, file: File) -> None:
-    tier, flags = _fake_health_for(file.filename)
-    file.metadata['~health_tier'] = tier
-    file.metadata['~health_flags'] = flags
+def _scan_one(filename: str) -> tuple[str, str]:
+    """Run on a background thread. Simulates real analysis (decode + measure)
+    taking noticeable time, instead of computing instantly inline.
+    """
+    time.sleep(0.5)
+    return _fake_health_for(filename)
+
+
+def _scan_finished(file: File, result: tuple[str, str] | None, error: BaseException | None) -> None:
+    """Runs back on the main thread once _scan_one completes."""
+    if result and not error:
+        tier, flags = result
+        file.metadata['~health_tier'] = tier
+        file.metadata['~health_flags'] = flags
+    file.clear_pending()
     file.update()
+
+
+class ScanHealthAction(BaseAction):
+    """Right-click action that triggers the (fake) health scan on demand.
+
+    Not automatic on file load — real analysis needs to decode audio, which
+    is neither instant nor safe to run inline on the file-load callback.
+    Each file's scan runs on a background thread via run_task, same pattern
+    Picard's own AcoustID fingerprinting uses for fpcalc.
+    """
+
+    TITLE = "Scan File Health (Demo)…"
+
+    def callback(self, objs) -> None:
+        files = list(iter_files_from_objects(objs))
+        if not files:
+            return
+        tagger_instance().window.set_statusbar_message(
+            "Scanning file health for %(count)d file(s)…",
+            {'count': len(files)},
+            echo=None,
+        )
+        for file in files:
+            file.set_pending()
+            run_task(
+                lambda f=file: _scan_one(f.filename),
+                lambda result=None, error=None, f=file: _scan_finished(f, result, error),
+            )
 
 
 class HealthProvider(ColumnValueProvider, DelegateProvider):
@@ -242,7 +289,9 @@ def enable(api: PluginApi) -> None:
         title="Health flags",
     )
 
-    api.register_file_post_load_processor(_apply_fake_health)
+    api.register_file_action(ScanHealthAction)
+    api.register_track_action(ScanHealthAction)
+    api.register_cluster_action(ScanHealthAction)
 
     # Force any already-open tree views to rebuild their header (column
     # count + labels) and recompute every existing row's cell text for the
