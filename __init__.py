@@ -42,13 +42,15 @@ from picard.ui.match_icons import (
 # Ordered worst-to-best so tier index doubles as a sort key.
 TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
 
-FAKE_FLAGS = {
-    "Bad": "Clipping detected; likely transcoded (16kHz cutoff)",
-    "Poor": "Likely transcoded (17.5kHz cutoff)",
-    "Ok": "Elevated noise floor (60Hz hum)",
-    "Good": "",
-    "Great": "",
-    "Excellent": "",
+# Per-tier list of demo issues. Only "Excellent" is genuinely clean — every
+# other tier has to have a reason it isn't, even if the reason is minor.
+FAKE_ISSUES: dict[str, tuple[str, ...]] = {
+    "Bad": ("Clipping detected", "Likely transcoded (16kHz cutoff)"),
+    "Poor": ("Likely transcoded (17.5kHz cutoff)",),
+    "Ok": ("Elevated noise floor (60Hz hum)",),
+    "Good": ("Bitrate below transparency threshold for codec",),
+    "Great": ("Slightly reduced dynamic range (DR9)",),
+    "Excellent": (),
 }
 
 
@@ -59,7 +61,7 @@ def _fake_health_for(filename: str) -> tuple[str, str]:
     etc.) so the same file always shows the same demo value across runs.
     """
     tier = TIERS[hash(filename) % len(TIERS)]
-    return tier, FAKE_FLAGS[tier]
+    return tier, "; ".join(FAKE_ISSUES[tier])
 
 
 def _apply_fake_health(api: PluginApi, file: File) -> None:
@@ -70,7 +72,7 @@ def _apply_fake_health(api: PluginApi, file: File) -> None:
 
 
 class HealthProvider(ColumnValueProvider, DelegateProvider):
-    """Column that displays health tier as colored text with a flags tooltip."""
+    """Column that displays health tier as a bookmark icon with an issues tooltip."""
 
     def __init__(self) -> None:
         self._delegate_class = HealthColumnDelegate
@@ -86,23 +88,23 @@ class HealthProvider(ColumnValueProvider, DelegateProvider):
         except ValueError:
             return "-1"
 
-    def get_health_info(self, obj: Item) -> dict[str, str] | None:
+    def get_health_info(self, obj: Item) -> dict[str, object] | None:
         column_method = getattr(obj, 'column', None)
         if not callable(column_method):
             return None
         tier = column_method('~health_tier')
         if not tier:
             return None
-        return {'tier': tier, 'flags': column_method('~health_flags')}
+        return {'tier': tier, 'issues': FAKE_ISSUES.get(tier, ())}
 
     def get_delegate_class(self) -> type[QtWidgets.QStyledItemDelegate]:
         return self._delegate_class
 
 
 class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
-    """Renders the health tier as colored text; flags appear only on hover."""
+    """Renders the health tier as a bookmark icon; hover shows every issue."""
 
-    def _get_info(self, index: QtCore.QModelIndex) -> dict[str, str] | None:
+    def _get_info(self, index: QtCore.QModelIndex) -> dict[str, object] | None:
         tree_widget = self.parent()
         if not tree_widget:
             return None
@@ -147,6 +149,14 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         y = option.rect.y() + (option.rect.height() - icon_size) // 2
         icon.paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
 
+    def _format_tooltip(self, info: dict[str, object]) -> str:
+        tier = info['tier']
+        issues = info['issues']
+        if issues:
+            items = "".join(f"<li>{issue}</li>" for issue in issues)
+            return f"<b>{tier}</b><ul style='margin-left:-20px;'>{items}</ul>"
+        return f"<b>{tier}</b><br>No issues detected"
+
     def helpEvent(
         self,
         event: QtGui.QHelpEvent | None,
@@ -155,9 +165,9 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         index: QtCore.QModelIndex,
     ) -> bool:
         info = self._get_info(index)
-        if not info or not info['flags'] or event is None:
+        if not info or event is None:
             return False
-        QtWidgets.QToolTip.showText(event.globalPos(), info['flags'], view)
+        QtWidgets.QToolTip.showText(event.globalPos(), self._format_tooltip(info), view)
         return True
 
     def sizeHint(
