@@ -10,6 +10,9 @@ signal analysis (clipping, spectral cutoff, LUFS, etc.) once the demo is
 validated.
 """
 
+from PyQt6 import QtCore
+
+from picard import tagger_instance
 from picard.file import File
 from picard.plugin3.api import PluginApi
 from picard.ui.itemviews.custom_columns.storage import (
@@ -86,6 +89,15 @@ def enable(api: PluginApi) -> None:
             width=260,
         )
     )
+
+    # TEMP DEBUG ONLY — not part of the plugin, remove before real use.
+    # Grabs the main window via Qt's own compositor (works without macOS
+    # screen-recording permission) so we can inspect the result headlessly.
+    def _snapshot():
+        win = tagger_instance().window
+        win.grab().save('/tmp/picard_health_demo.png')
+
+    QtCore.QTimer.singleShot(4000, _snapshot)
 
 
 def disable() -> None:
