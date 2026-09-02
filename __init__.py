@@ -1,25 +1,16 @@
-"""File Health — demo plugin.
-
-DEMO ONLY: wires up fake per-file "health" stats to a visible column so we
-can see what the surfacing mechanism actually looks like in the UI, before
-implementing any real audio analysis.
+"""File Health plugin.
 
 Surfaces one compact "Health" column (colored tier text, matching Picard's
 own match-quality delegate-column pattern) with the itemized reasons in a
 hover tooltip, rather than a separate always-visible text column — a wide
-free-text column doesn't scale as more checks (clipping, transcode, hum,
-phase...) get added, isn't sortable/filterable, and duplicates information
-better shown on demand.
+free-text column doesn't scale as more checks get added, isn't
+sortable/filterable, and duplicates information better shown on demand.
 
-The "health tier" and "flags" below are computed from a hash of the
-filename, not from decoding audio — a stand-in for real signal analysis
-(clipping, spectral cutoff, LUFS, etc.). The content hash and
-changed-since-last-scan detection, however, are real: computed from the
-file's actual bytes on disk, not simulated.
+Real analysis (clipping, spectral-cutoff/transcode detection, a coarse
+LUFS-based loudness gradient, content-hash change detection) lives in
+analysis.py, via ffmpeg. See that module's docstring for exactly what's
+real vs. still-coarse-proxy vs. documented future work.
 """
-
-import hashlib
-import time
 
 from PyQt6 import (
     QtCore,
@@ -50,63 +41,35 @@ from picard.ui.match_icons import (
 from picard.util import iter_files_from_objects
 from picard.util.thread import run_task
 
+from . import analysis
 
-# Ordered worst-to-best so tier index doubles as a sort key.
+
+# Ordered worst-to-best, matches picard.ui.match_icons' 6 bookmark levels
+# and picard.file_health.analysis's tier names exactly.
 TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
-
-# Per-tier list of demo issues. Only "Excellent" is genuinely clean — every
-# other tier has to have a reason it isn't, even if the reason is minor.
-FAKE_ISSUES: dict[str, tuple[str, ...]] = {
-    "Bad": ("Clipping detected", "Likely transcoded (16kHz cutoff)"),
-    "Poor": ("Likely transcoded (17.5kHz cutoff)",),
-    "Ok": ("Elevated noise floor (60Hz hum)",),
-    "Good": ("Bitrate below transparency threshold for codec",),
-    "Great": ("Slightly reduced dynamic range (DR9)",),
-    "Excellent": (),
-}
-
-
-def _fake_health_for(filename: str) -> tuple[str, str]:
-    """Deterministic fake tier + flags derived from the filename.
-
-    Stands in for a real analysis pipeline (clipping/spectral-cutoff/LUFS/
-    etc.) so the same file always shows the same demo value across runs.
-    """
-    tier = TIERS[hash(filename) % len(TIERS)]
-    return tier, "; ".join(FAKE_ISSUES[tier])
-
-
-def _content_hash(filename: str) -> str:
-    """Real hash of the file's current bytes on disk — not simulated.
-
-    Not yet isolated to just the audio stream: tag edits change this too,
-    since tags live in the same file. Isolating to PCM-only content (skip
-    tag blocks) is real future work once we're decoding audio anyway for
-    the actual quality checks. Even the whole-file version is genuinely
-    useful today though: it detects "this file's bytes differ from what
-    we recorded last time we scanned it" — a real provenance signal, not
-    a quality judgment.
-    """
-    hasher = hashlib.blake2b(digest_size=16)
-    with open(filename, 'rb') as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def _scan_one(filename: str) -> dict[str, object]:
-    """Run on a background thread. The tier/flags are still simulated
-    (time.sleep stands in for real decode+measure work); the content hash
-    is real, computed from the actual file bytes.
+    """Runs on a background thread — real decode + measurement work via
+    ffmpeg (see analysis.py), not simulated.
     """
-    time.sleep(0.5)
-    tier, flags = _fake_health_for(filename)
-    return {'tier': tier, 'flags': flags, 'content_hash': _content_hash(filename)}
+    try:
+        result = analysis.analyze_file(filename)
+    except analysis.FfmpegNotFoundError:
+        # TODO: surface this via the Options page (path setting + guided
+        # find/download flow), instead of just failing silently. Noted,
+        # not yet built.
+        return {'error': 'ffmpeg not found'}
+    return {
+        'tier': result.tier,
+        'flags': "; ".join(result.issues),
+        'content_hash': result.content_hash,
+    }
 
 
 def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
     """Runs back on the main thread once _scan_one completes."""
-    if result and not error:
+    if result and not error and 'tier' in result:
         previous_hash = file.metadata['~health_content_hash']
         changed = bool(previous_hash) and previous_hash != result['content_hash']
         file.metadata['~health_tier'] = result['tier']
@@ -154,7 +117,7 @@ class HealthOptionsPage(OptionsPage):
 
 
 class ScanHealthAction(BaseAction):
-    """Right-click action that triggers the (fake) health scan on demand.
+    """Right-click action that triggers the health scan on demand.
 
     Manual by default — real analysis needs to decode audio, which is
     neither instant nor safe to run inline on the file-load callback.
@@ -280,7 +243,8 @@ class CompareResultsPanel(QtWidgets.QDialog):
 
         for file in group:
             tier = file.metadata['~health_tier']
-            issue_parts = list(FAKE_ISSUES.get(tier, ()))
+            stored_flags = file.metadata['~health_flags']
+            issue_parts = stored_flags.split("; ") if stored_flags else []
             if file.metadata['~health_changed_since_scan']:
                 issue_parts.insert(0, "Changed since last scan")
             issues = "; ".join(issue_parts) or "—"
@@ -408,8 +372,8 @@ class CompareHealthAction(BaseAction):
     actual decision to the user. Matches the design decided earlier: a
     perceptual-distance metric like ViSQOL/Zimtohrli would tell you the
     files differ, but not which one is better; the directional gate-field
-    reasons (what FAKE_ISSUES stands in for here) are what actually
-    inform that judgment.
+    reasons (real, from analysis.analyze_file, stored in ~health_flags)
+    are what actually inform that judgment.
     """
 
     TITLE = "Compare File Health (Demo)…"
@@ -471,9 +435,10 @@ class HealthProvider(ColumnValueProvider, DelegateProvider):
         tier = column_method('~health_tier')
         if not tier:
             return None
+        stored_flags = column_method('~health_flags')
         return {
             'tier': tier,
-            'issues': FAKE_ISSUES.get(tier, ()),
+            'issues': stored_flags.split("; ") if stored_flags else [],
             'changed_since_scan': bool(column_method('~health_changed_since_scan')),
         }
 
@@ -618,17 +583,17 @@ def enable(api: PluginApi) -> None:
     load_match_icons()
     api.register_script_variable(
         '_health_tier',
-        documentation="Demo-only fake health tier (Bad..Excellent).",
+        documentation="Health tier from the last scan (Bad..Excellent).",
         title="Health",
     )
     api.register_script_variable(
         '_health_flags',
-        documentation="Demo-only fake list of detected issues.",
+        documentation="Itemized list of issues found by the last scan.",
         title="Health flags",
     )
     api.register_script_variable(
         '_health_content_hash',
-        documentation="Hash of the file's bytes as of the last health scan (real, not simulated).",
+        documentation="Hash of the file's bytes as of the last health scan.",
         title="Health content hash",
     )
     api.register_script_variable(
