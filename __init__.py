@@ -174,6 +174,21 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         return QtCore.QSize(70, 20)
 
 
+# Registered at import time, not inside enable(), to match how Picard's own
+# core columns register (ALBUMVIEW_COLUMNS.insert(...) at columns.py import
+# time) — this must happen before any tree view builds its header, which
+# plugin enable() apparently runs too late for.
+_HEALTH_COLUMN = make_delegate_column(
+    "Health",
+    '~health_tier',
+    HealthProvider(),
+    width=70,
+    size=QtCore.QSize(60, 16),
+)
+_HEALTH_COLUMN.is_default = True
+registry.register(_HEALTH_COLUMN, add_to={'FILE_VIEW', 'ALBUM_VIEW'})
+
+
 def enable(api: PluginApi) -> None:
     """Called when the plugin is enabled."""
     api.logger.info("File Health (demo) enabled")
@@ -191,16 +206,7 @@ def enable(api: PluginApi) -> None:
 
     api.register_file_post_load_processor(_apply_fake_health)
 
-    column = make_delegate_column(
-        "Health",
-        '~health_tier',
-        HealthProvider(),
-        width=70,
-        size=QtCore.QSize(60, 16),
-    )
-    column.is_default = True
-    registry.register(column, add_to={'FILE_VIEW', 'ALBUM_VIEW'})
-
 
 def disable() -> None:
     """Called when the plugin is disabled."""
+    registry.unregister(_HEALTH_COLUMN.key)
