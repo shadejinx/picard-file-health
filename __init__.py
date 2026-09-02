@@ -183,6 +183,34 @@ _HEALTH_COLUMN.is_default = True
 registry.register(_HEALTH_COLUMN, add_to={'FILE_VIEW', 'ALBUM_VIEW'})
 
 
+def _install_delegate_on_live_views() -> None:
+    """Attach the icon-painting delegate to any already-open tree widgets.
+
+    ``setItemDelegateForColumn`` is only ever called once, inside each tree
+    view's own ``_init_header()``, over whatever columns existed at that
+    exact moment. Adding a column afterward (which is the only timing a
+    plugin can realistically achieve) grows the header and column count via
+    ``header_events.headers_updated``, but never gets a delegate wired up on
+    an already-open window — so the cell falls back to Qt's default (text)
+    renderer, which has nothing to paint for a delegate column. This
+    manually finishes that wiring on whatever tree widgets already exist.
+    """
+    app = QtWidgets.QApplication.instance()
+    if not app:
+        return
+    for widget in app.allWidgets():
+        columns = getattr(widget, 'columns', None)
+        if columns is None:
+            continue
+        try:
+            index = list(columns).index(_HEALTH_COLUMN)
+        except ValueError:
+            continue
+        set_delegate = getattr(widget, 'setItemDelegateForColumn', None)
+        if callable(set_delegate):
+            set_delegate(index, HealthColumnDelegate(widget))
+
+
 def enable(api: PluginApi) -> None:
     """Called when the plugin is enabled."""
     api.logger.info("File Health (demo) enabled")
@@ -218,6 +246,7 @@ def enable(api: PluginApi) -> None:
     # an immediate emit with zero listeners connected yet is a silent
     # no-op, not queued for later delivery.
     QtCore.QTimer.singleShot(0, header_events.headers_updated.emit)
+    QtCore.QTimer.singleShot(0, _install_delegate_on_live_views)
 
 
 def disable() -> None:
