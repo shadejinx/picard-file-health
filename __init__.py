@@ -153,17 +153,86 @@ def _tier_rank(file: File) -> int:
         return -1
 
 
+class CompareResultsPanel(QtWidgets.QDialog):
+    """Non-modal panel listing every file in each shared-identity group.
+
+    Doesn't declare a winner — presents every file's tier and issues side
+    by side, per group, and only bolds whichever scored higher within its
+    own group as a subtle cue. The user decides; we show the data.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("File Health Comparison (Demo)")
+        self.setModal(False)
+        self.resize(560, 360)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        self.tree = QtWidgets.QTreeWidget(self)
+        self.tree.setHeaderLabels(["File", "Health", "Issues"])
+        self.tree.setColumnWidth(0, 220)
+        self.tree.setColumnWidth(1, 90)
+        self.tree.setRootIsDecorated(True)
+        layout.addWidget(self.tree)
+
+        caption = QtWidgets.QLabel(
+            "Bold rows scored higher on the checks we ran for that group — "
+            "not a directive, just what the data shows.",
+            self,
+        )
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, self)
+        buttons.rejected.connect(self.close)
+        layout.addWidget(buttons)
+
+    def add_group(self, key: str, group: list[File]) -> None:
+        header = QtWidgets.QTreeWidgetItem([key])
+        header.setFirstColumnSpanned(True)
+        italic = header.font(0)
+        italic.setItalic(True)
+        header.setFont(0, italic)
+        self.tree.addTopLevelItem(header)
+
+        unscanned = [f for f in group if not f.metadata['~health_tier']]
+        if unscanned:
+            for file in group:
+                tier = file.metadata['~health_tier'] or "Not yet scanned"
+                header.addChild(QtWidgets.QTreeWidgetItem([file.base_filename, tier, ""]))
+            header.setExpanded(True)
+            return
+
+        ranks = {file: _tier_rank(file) for file in group}
+        best_rank = max(ranks.values())
+        tie = len({r for r in ranks.values()}) == 1
+
+        for file in group:
+            tier = file.metadata['~health_tier']
+            issues = "; ".join(FAKE_ISSUES.get(tier, ())) or "—"
+            item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, issues])
+            if not tie and ranks[file] == best_rank:
+                bold = item.font(0)
+                bold.setBold(True)
+                item.setFont(0, bold)
+                item.setFont(1, bold)
+            header.addChild(item)
+        header.setExpanded(True)
+
+
 class CompareHealthAction(BaseAction):
     """Right-click action that compares files sharing the same recording.
 
     Groups the selection by AcoustID (falling back to the MusicBrainz
-    recording MBID), then for each group with more than one file and a
-    health-tier gap, names a recommended file and the specific reason the
-    other one lost — not a bare distance number. Matches the design
+    recording MBID) and opens a non-modal panel listing every file's tier
+    and issues per group, side by side. Doesn't declare a hard winner —
+    only bolds whichever file scored higher within its group, as a subtle
+    cue, leaving the actual decision to the user. Matches the design
     decided earlier: a perceptual-distance metric like ViSQOL/Zimtohrli
     would tell you the files differ, but not which one is better; the
-    directional gate fields (what FAKE_ISSUES stands in for here) are what
-    actually decide a winner.
+    directional gate-field reasons (what FAKE_ISSUES stands in for here)
+    are what actually inform that judgment.
     """
 
     TITLE = "Compare File Health (Demo)…"
@@ -179,32 +248,14 @@ class CompareHealthAction(BaseAction):
             )
             return
 
-        sections = []
+        panel = CompareResultsPanel(window)
         for key, group in groups.items():
-            unscanned = [f for f in group if not f.metadata['~health_tier']]
-            if unscanned:
-                names = ", ".join(f.base_filename for f in unscanned)
-                sections.append(f"{key}: not all files scanned yet ({names}) — run Scan File Health first.")
-                continue
-
-            ranked = sorted(group, key=_tier_rank, reverse=True)
-            best, worst = ranked[0], ranked[-1]
-            best_tier = best.metadata['~health_tier']
-            worst_tier = worst.metadata['~health_tier']
-
-            if best_tier == worst_tier:
-                sections.append(f"{key}: {len(group)} files, all rated {best_tier} — no clear winner.")
-                continue
-
-            reasons = FAKE_ISSUES.get(worst_tier, ())
-            reason_text = reasons[0] if reasons else "unspecified"
-            sections.append(
-                f"{key}:\n"
-                f"  Recommended: {best.base_filename} ({best_tier})\n"
-                f"  Over: {worst.base_filename} ({worst_tier}) — {reason_text}"
-            )
-
-        QtWidgets.QMessageBox.information(window, "File Health Comparison (Demo)", "\n\n".join(sections))
+            panel.add_group(key, group)
+        panel.show()
+        # Keep a reference so the panel isn't garbage-collected once
+        # callback() returns — the action instance persists for the
+        # app's lifetime as a registered menu action.
+        self._panel = panel
 
 
 class HealthProvider(ColumnValueProvider, DelegateProvider):
