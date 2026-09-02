@@ -33,6 +33,7 @@ from picard.item import Item
 from picard.track import Track
 from picard.plugin3.api import (
     BaseAction,
+    OptionsPage,
     PluginApi,
 )
 from picard.ui.itemviews.custom_columns.factory import make_delegate_column
@@ -116,13 +117,51 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
     file.update()
 
 
+def _maybe_auto_scan(api: PluginApi, file: File) -> None:
+    """File-post-load hook, always registered — checks the option live so
+    toggling it in Options takes effect immediately, no restart needed.
+    """
+    if not api.plugin_config.get('auto_scan', False):
+        return
+    file.set_pending()
+    run_task(
+        lambda f=file: _scan_one(f.filename),
+        lambda result=None, error=None, f=file: _scan_finished(f, result, error),
+    )
+
+
+class HealthOptionsPage(OptionsPage):
+    NAME = "file_health"
+    TITLE = "File Health (Demo)"
+    PARENT = "plugins"
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        self.auto_scan_checkbox = QtWidgets.QCheckBox(
+            "Automatically scan newly added files (runs the same "
+            "background-threaded scan as the manual action)",
+            self,
+        )
+        layout.addWidget(self.auto_scan_checkbox)
+        layout.addStretch(1)
+
+    def load(self) -> None:
+        self.auto_scan_checkbox.setChecked(self.api.plugin_config.get('auto_scan', False))
+
+    def save(self) -> None:
+        self.api.plugin_config['auto_scan'] = self.auto_scan_checkbox.isChecked()
+
+
 class ScanHealthAction(BaseAction):
     """Right-click action that triggers the (fake) health scan on demand.
 
-    Not automatic on file load — real analysis needs to decode audio, which
-    is neither instant nor safe to run inline on the file-load callback.
-    Each file's scan runs on a background thread via run_task, same pattern
-    Picard's own AcoustID fingerprinting uses for fpcalc.
+    Manual by default — real analysis needs to decode audio, which is
+    neither instant nor safe to run inline on the file-load callback.
+    An opt-in automatic mode is available via Options (off by default,
+    same background-threaded scan either way). Each scan runs on a
+    background thread via run_task, same pattern Picard's own AcoustID
+    fingerprinting uses for fpcalc.
     """
 
     TITLE = "Scan File Health (Demo)…"
@@ -597,6 +636,9 @@ def enable(api: PluginApi) -> None:
         documentation="Non-empty if the file's bytes changed since the last health scan.",
         title="Health changed since scan",
     )
+    api.plugin_config.register_option('auto_scan', False)
+    api.register_file_post_load_processor(_maybe_auto_scan)
+    api.register_options_page(HealthOptionsPage)
 
     api.register_file_action(ScanHealthAction)
     api.register_track_action(ScanHealthAction)
