@@ -82,11 +82,22 @@ def enable(api: PluginApi) -> None:
     )
     register_and_persist(
         CustomColumnSpec(
+            title="Health",
+            key="health_demo_tier",
+            kind=CustomColumnKind.FIELD,
+            expression="~health_tier",
+            width=80,
+            always_visible=True,
+        )
+    )
+    register_and_persist(
+        CustomColumnSpec(
             title="Health Flags",
             key="health_demo_flags",
             kind=CustomColumnKind.FIELD,
             expression="~health_flags",
             width=260,
+            always_visible=True,
         )
     )
 
