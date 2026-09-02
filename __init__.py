@@ -12,11 +12,13 @@ phase...) get added, isn't sortable/filterable, and duplicates information
 better shown on demand.
 
 The "health tier" and "flags" below are computed from a hash of the
-filename, not from decoding audio. Replace `_fake_health_for` with real
-signal analysis (clipping, spectral cutoff, LUFS, etc.) once the demo is
-validated.
+filename, not from decoding audio — a stand-in for real signal analysis
+(clipping, spectral cutoff, LUFS, etc.). The content hash and
+changed-since-last-scan detection, however, are real: computed from the
+file's actual bytes on disk, not simulated.
 """
 
+import hashlib
 import time
 
 from PyQt6 import (
@@ -73,20 +75,43 @@ def _fake_health_for(filename: str) -> tuple[str, str]:
     return tier, "; ".join(FAKE_ISSUES[tier])
 
 
-def _scan_one(filename: str) -> tuple[str, str]:
-    """Run on a background thread. Simulates real analysis (decode + measure)
-    taking noticeable time, instead of computing instantly inline.
+def _content_hash(filename: str) -> str:
+    """Real hash of the file's current bytes on disk — not simulated.
+
+    Not yet isolated to just the audio stream: tag edits change this too,
+    since tags live in the same file. Isolating to PCM-only content (skip
+    tag blocks) is real future work once we're decoding audio anyway for
+    the actual quality checks. Even the whole-file version is genuinely
+    useful today though: it detects "this file's bytes differ from what
+    we recorded last time we scanned it" — a real provenance signal, not
+    a quality judgment.
+    """
+    hasher = hashlib.blake2b(digest_size=16)
+    with open(filename, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _scan_one(filename: str) -> dict[str, object]:
+    """Run on a background thread. The tier/flags are still simulated
+    (time.sleep stands in for real decode+measure work); the content hash
+    is real, computed from the actual file bytes.
     """
     time.sleep(0.5)
-    return _fake_health_for(filename)
+    tier, flags = _fake_health_for(filename)
+    return {'tier': tier, 'flags': flags, 'content_hash': _content_hash(filename)}
 
 
-def _scan_finished(file: File, result: tuple[str, str] | None, error: BaseException | None) -> None:
+def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
     """Runs back on the main thread once _scan_one completes."""
     if result and not error:
-        tier, flags = result
-        file.metadata['~health_tier'] = tier
-        file.metadata['~health_flags'] = flags
+        previous_hash = file.metadata['~health_content_hash']
+        changed = bool(previous_hash) and previous_hash != result['content_hash']
+        file.metadata['~health_tier'] = result['tier']
+        file.metadata['~health_flags'] = result['flags']
+        file.metadata['~health_content_hash'] = result['content_hash']
+        file.metadata['~health_changed_since_scan'] = '1' if changed else ''
     file.clear_pending()
     file.update()
 
@@ -216,7 +241,10 @@ class CompareResultsPanel(QtWidgets.QDialog):
 
         for file in group:
             tier = file.metadata['~health_tier']
-            issues = "; ".join(FAKE_ISSUES.get(tier, ())) or "—"
+            issue_parts = list(FAKE_ISSUES.get(tier, ()))
+            if file.metadata['~health_changed_since_scan']:
+                issue_parts.insert(0, "Changed since last scan")
+            issues = "; ".join(issue_parts) or "—"
             item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, issues])
             item.setData(0, _FILE_ROLE, file)
             if not tie and ranks[file] == best_rank:
@@ -404,7 +432,11 @@ class HealthProvider(ColumnValueProvider, DelegateProvider):
         tier = column_method('~health_tier')
         if not tier:
             return None
-        return {'tier': tier, 'issues': FAKE_ISSUES.get(tier, ())}
+        return {
+            'tier': tier,
+            'issues': FAKE_ISSUES.get(tier, ()),
+            'changed_since_scan': bool(column_method('~health_changed_since_scan')),
+        }
 
     def get_delegate_class(self) -> type[QtWidgets.QStyledItemDelegate]:
         return self._delegate_class
@@ -461,12 +493,17 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
     def _format_tooltip(self, info: dict[str, object]) -> str:
         tier = info['tier']
         issues = info['issues']
+        parts = [f"<b>{tier}</b>"]
+        if info.get('changed_since_scan'):
+            parts.append(
+                "<div style='color:#b7950b;'>Audio content changed since last scan</div>"
+            )
         if issues:
             items = "".join(f"<li>{issue}</li>" for issue in issues)
-            body = f"<b>{tier}</b><ul style='margin-left:-20px;'>{items}</ul>"
+            parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
         else:
-            body = f"<b>{tier}</b><br>No issues detected"
-        return f"<div style='white-space:nowrap;'>{body}</div>"
+            parts.append("<br>No issues detected")
+        return f"<div style='white-space:nowrap;'>{''.join(parts)}</div>"
 
     def helpEvent(
         self,
@@ -549,6 +586,16 @@ def enable(api: PluginApi) -> None:
         '_health_flags',
         documentation="Demo-only fake list of detected issues.",
         title="Health flags",
+    )
+    api.register_script_variable(
+        '_health_content_hash',
+        documentation="Hash of the file's bytes as of the last health scan (real, not simulated).",
+        title="Health content hash",
+    )
+    api.register_script_variable(
+        '_health_changed_since_scan',
+        documentation="Non-empty if the file's bytes changed since the last health scan.",
+        title="Health changed since scan",
     )
 
     api.register_file_action(ScanHealthAction)
