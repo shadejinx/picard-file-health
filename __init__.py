@@ -153,6 +153,9 @@ def _tier_rank(file: File) -> int:
         return -1
 
 
+_FILE_ROLE = QtCore.Qt.ItemDataRole.UserRole
+
+
 class CompareResultsPanel(QtWidgets.QDialog):
     """Non-modal panel listing every file in each shared-identity group.
 
@@ -165,7 +168,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("File Health Comparison (Demo)")
         self.setModal(False)
-        self.resize(560, 360)
+        self.resize(620, 380)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -174,19 +177,37 @@ class CompareResultsPanel(QtWidgets.QDialog):
         self.tree.setColumnWidth(0, 220)
         self.tree.setColumnWidth(1, 90)
         self.tree.setRootIsDecorated(True)
+        self.tree.itemSelectionChanged.connect(self._update_button_states)
+        self.tree.itemDoubleClicked.connect(lambda *_: self._show_in_list())
         layout.addWidget(self.tree)
 
         caption = QtWidgets.QLabel(
             "Bold rows scored higher on the checks we ran for that group — "
-            "not a directive, just what the data shows.",
+            "not a directive, just what the data shows. Double-click a row "
+            "to find it in the file/album list.",
             self,
         )
         caption.setWordWrap(True)
         layout.addWidget(caption)
 
+        action_row = QtWidgets.QHBoxLayout()
+        self.show_button = QtWidgets.QPushButton("Show in List", self)
+        self.show_button.clicked.connect(self._show_in_list)
+        self.remove_button = QtWidgets.QPushButton("Remove from Picard", self)
+        self.remove_button.clicked.connect(self._remove_from_picard)
+        self.trash_button = QtWidgets.QPushButton("Move to Trash…", self)
+        self.trash_button.clicked.connect(self._trash_file)
+        action_row.addWidget(self.show_button)
+        action_row.addWidget(self.remove_button)
+        action_row.addWidget(self.trash_button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, self)
         buttons.rejected.connect(self.close)
         layout.addWidget(buttons)
+
+        self._update_button_states()
 
     def add_group(self, key: str, group: list[File]) -> None:
         header = QtWidgets.QTreeWidgetItem([key])
@@ -200,7 +221,9 @@ class CompareResultsPanel(QtWidgets.QDialog):
         if unscanned:
             for file in group:
                 tier = file.metadata['~health_tier'] or "Not yet scanned"
-                header.addChild(QtWidgets.QTreeWidgetItem([file.base_filename, tier, ""]))
+                item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, ""])
+                item.setData(0, _FILE_ROLE, file)
+                header.addChild(item)
             header.setExpanded(True)
             return
 
@@ -212,6 +235,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
             tier = file.metadata['~health_tier']
             issues = "; ".join(FAKE_ISSUES.get(tier, ())) or "—"
             item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, issues])
+            item.setData(0, _FILE_ROLE, file)
             if not tie and ranks[file] == best_rank:
                 bold = item.font(0)
                 bold.setBold(True)
@@ -219,6 +243,69 @@ class CompareResultsPanel(QtWidgets.QDialog):
                 item.setFont(1, bold)
             header.addChild(item)
         header.setExpanded(True)
+
+    def _current_file(self) -> File | None:
+        items = self.tree.selectedItems()
+        if not items:
+            return None
+        return items[0].data(0, _FILE_ROLE)
+
+    def _update_button_states(self) -> None:
+        has_file = self._current_file() is not None
+        self.show_button.setEnabled(has_file)
+        self.remove_button.setEnabled(has_file)
+        self.trash_button.setEnabled(has_file)
+
+    def _remove_row_for(self, file: File) -> None:
+        for i in range(self.tree.topLevelItemCount()):
+            header = self.tree.topLevelItem(i)
+            for j in range(header.childCount()):
+                if header.child(j).data(0, _FILE_ROLE) is file:
+                    header.removeChild(header.child(j))
+                    return
+
+    def _show_in_list(self) -> None:
+        """Select and scroll to this file in whichever tree is showing it.
+
+        Solves the correlation problem directly instead of relying on the
+        user visually matching names — once files are matched to a track,
+        the main window's own list shows the shared track title, not the
+        filename, so eyeballing which row is which isn't reliable.
+        """
+        file = self._current_file()
+        if file is None:
+            return
+        ui_item = file.ui_item
+        if ui_item is None:
+            return
+        tree = ui_item.treeWidget()
+        if tree is None:
+            return
+        tree.setCurrentItem(ui_item)
+        tree.scrollToItem(ui_item)
+        tree.setFocus()
+
+    def _remove_from_picard(self) -> None:
+        file = self._current_file()
+        if file is None:
+            return
+        tagger_instance().remove([file])
+        self._remove_row_for(file)
+
+    def _trash_file(self) -> None:
+        file = self._current_file()
+        if file is None:
+            return
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Move to Trash",
+            f"Move {file.base_filename} to the system trash?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            tagger_instance().trash_files([file])
+            self._remove_row_for(file)
 
 
 class CompareHealthAction(BaseAction):
