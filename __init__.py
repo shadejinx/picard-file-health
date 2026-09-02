@@ -118,6 +118,95 @@ class ScanHealthAction(BaseAction):
             )
 
 
+def _identity_key(file: File) -> str | None:
+    """Best available "same recording" signal for a file.
+
+    Prefers AcoustID (audio-fingerprint match, set after Scan/AcoustID
+    lookup) over the MusicBrainz recording MBID (set after a plain
+    metadata Lookup) — AcoustID is evidence about the actual audio content,
+    the recording MBID is evidence about the tag-matched identity, which is
+    weaker but still meaningful for grouping.
+    """
+    acoustid = file.metadata['acoustid_id']
+    if acoustid:
+        return f"acoustid:{acoustid}"
+    recording_id = file.metadata['musicbrainz_recordingid']
+    if recording_id:
+        return f"recording:{recording_id}"
+    return None
+
+
+def _group_by_identity(files: list[File]) -> dict[str, list[File]]:
+    groups: dict[str, list[File]] = {}
+    for file in files:
+        key = _identity_key(file)
+        if key:
+            groups.setdefault(key, []).append(file)
+    return groups
+
+
+def _tier_rank(file: File) -> int:
+    """Higher is better; -1 means not yet scanned."""
+    try:
+        return TIERS.index(file.metadata['~health_tier'])
+    except ValueError:
+        return -1
+
+
+class CompareHealthAction(BaseAction):
+    """Right-click action that compares files sharing the same recording.
+
+    Groups the selection by AcoustID (falling back to the MusicBrainz
+    recording MBID), then for each group with more than one file and a
+    health-tier gap, names a recommended file and the specific reason the
+    other one lost — not a bare distance number. Matches the design
+    decided earlier: a perceptual-distance metric like ViSQOL/Zimtohrli
+    would tell you the files differ, but not which one is better; the
+    directional gate fields (what FAKE_ISSUES stands in for here) are what
+    actually decide a winner.
+    """
+
+    TITLE = "Compare File Health (Demo)…"
+
+    def callback(self, objs) -> None:
+        files = list(iter_files_from_objects(objs))
+        groups = {key: group for key, group in _group_by_identity(files).items() if len(group) > 1}
+        window = tagger_instance().window
+        if not groups:
+            window.set_statusbar_message(
+                "No two selected files share the same AcoustID or recording.",
+                echo=None,
+            )
+            return
+
+        sections = []
+        for key, group in groups.items():
+            unscanned = [f for f in group if not f.metadata['~health_tier']]
+            if unscanned:
+                names = ", ".join(f.base_filename for f in unscanned)
+                sections.append(f"{key}: not all files scanned yet ({names}) — run Scan File Health first.")
+                continue
+
+            ranked = sorted(group, key=_tier_rank, reverse=True)
+            best, worst = ranked[0], ranked[-1]
+            best_tier = best.metadata['~health_tier']
+            worst_tier = worst.metadata['~health_tier']
+
+            if best_tier == worst_tier:
+                sections.append(f"{key}: {len(group)} files, all rated {best_tier} — no clear winner.")
+                continue
+
+            reasons = FAKE_ISSUES.get(worst_tier, ())
+            reason_text = reasons[0] if reasons else "unspecified"
+            sections.append(
+                f"{key}:\n"
+                f"  Recommended: {best.base_filename} ({best_tier})\n"
+                f"  Over: {worst.base_filename} ({worst_tier}) — {reason_text}"
+            )
+
+        QtWidgets.QMessageBox.information(window, "File Health Comparison (Demo)", "\n\n".join(sections))
+
+
 class HealthProvider(ColumnValueProvider, DelegateProvider):
     """Column that displays health tier as a bookmark icon with an issues tooltip."""
 
@@ -292,6 +381,10 @@ def enable(api: PluginApi) -> None:
     api.register_file_action(ScanHealthAction)
     api.register_track_action(ScanHealthAction)
     api.register_cluster_action(ScanHealthAction)
+
+    api.register_file_action(CompareHealthAction)
+    api.register_track_action(CompareHealthAction)
+    api.register_cluster_action(CompareHealthAction)
 
     # Force any already-open tree views to rebuild their header (column
     # count + labels) and recompute every existing row's cell text for the
