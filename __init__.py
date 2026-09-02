@@ -10,9 +10,6 @@ signal analysis (clipping, spectral cutoff, LUFS, etc.) once the demo is
 validated.
 """
 
-from PyQt6 import QtCore
-
-from picard import tagger_instance
 from picard.file import File
 from picard.plugin3.api import PluginApi
 from picard.ui.itemviews.custom_columns.storage import (
@@ -69,17 +66,8 @@ def enable(api: PluginApi) -> None:
 
     api.register_file_post_load_processor(_apply_fake_health)
 
-    # Auto-provision a visible column so the tier shows up without the user
+    # Auto-provision visible columns so the values show up without the user
     # having to open the Custom Columns manager themselves.
-    register_and_persist(
-        CustomColumnSpec(
-            title="Health",
-            key="health_demo_tier",
-            kind=CustomColumnKind.FIELD,
-            expression="~health_tier",
-            width=80,
-        )
-    )
     register_and_persist(
         CustomColumnSpec(
             title="Health",
@@ -100,15 +88,6 @@ def enable(api: PluginApi) -> None:
             always_visible=True,
         )
     )
-
-    # TEMP DEBUG ONLY — not part of the plugin, remove before real use.
-    # Grabs the main window via Qt's own compositor (works without macOS
-    # screen-recording permission) so we can inspect the result headlessly.
-    def _snapshot():
-        win = tagger_instance().window
-        win.grab().save('/tmp/picard_health_demo.png')
-
-    QtCore.QTimer.singleShot(4000, _snapshot)
 
 
 def disable() -> None:
