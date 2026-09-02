@@ -32,6 +32,7 @@ from picard.ui.itemviews.custom_columns.protocols import (
     DelegateProvider,
 )
 from picard.ui.itemviews.custom_columns.registry import registry
+from picard.ui.itemviews.events import header_events
 
 
 # Ordered worst-to-best so tier index doubles as a sort key.
@@ -205,6 +206,14 @@ def enable(api: PluginApi) -> None:
     )
 
     api.register_file_post_load_processor(_apply_fake_health)
+
+    # Force any already-open tree views to rebuild their header (column
+    # count + labels) and recompute every existing row's cell text for the
+    # new column. Without this, the column is registered and even shows as
+    # checked in the header menu, but never actually renders — the tree
+    # widget's Qt column count is fixed at construction and isn't rebuilt
+    # just by mutating the shared columns list or toggling visibility.
+    header_events.headers_updated.emit()
 
 
 def disable() -> None:
