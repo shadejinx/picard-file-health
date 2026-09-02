@@ -121,7 +121,7 @@ def _maybe_auto_scan(api: PluginApi, file: File) -> None:
     """File-post-load hook, always registered — checks the option live so
     toggling it in Options takes effect immediately, no restart needed.
     """
-    if not api.plugin_config.get('auto_scan', False):
+    if not api.plugin_config['auto_scan']:
         return
     file.set_pending()
     run_task(
@@ -147,7 +147,7 @@ class HealthOptionsPage(OptionsPage):
         layout.addStretch(1)
 
     def load(self) -> None:
-        self.auto_scan_checkbox.setChecked(self.api.plugin_config.get('auto_scan', False))
+        self.auto_scan_checkbox.setChecked(self.api.plugin_config['auto_scan'])
 
     def save(self) -> None:
         self.api.plugin_config['auto_scan'] = self.auto_scan_checkbox.isChecked()
