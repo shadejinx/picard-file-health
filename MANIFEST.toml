@@ -1,6 +1,6 @@
 uuid = "e9df52ff-636f-45cb-8020-c8dbb71991fb"
 name = "File Health"
-description = "Demo: surfaces fake per-file health stats to preview the UI"
+description = "Detects clipping, transcoding, and loudness-war mastering via ffmpeg"
 api = ["3.0"]
 authors = ["Demo"]
 categories = ["metadata"]
