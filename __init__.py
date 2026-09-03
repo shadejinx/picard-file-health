@@ -87,6 +87,7 @@ class _SensitivitySlider(QtWidgets.QFrame):
 
         header = QtWidgets.QHBoxLayout()
         title_label = QtWidgets.QLabel(title, self)
+        title_label.setWordWrap(False)
         bold = title_label.font()
         bold.setBold(True)
         title_label.setFont(bold)
@@ -172,7 +173,7 @@ _SPECTRAL_STEPS: list[tuple[float, str]] = [
     (-85.0, "Requires close to true silence above the cutoff."),
     (-75.0, "Requires strong silence above the cutoff frequency."),
     (-65.0, "Slightly more sensitive than default."),
-    (-60.0, "Balanced default — matches real transcodes we've tested."),
+    (-60.0, "Balanced default — matches real transcodes and fake hi-res files we've tested."),
     (-55.0, "Slightly more likely to flag quiet-but-real high frequencies."),
     (-50.0, "Moderately sensitive — may flag naturally soft treble."),
     (-45.0, "Sensitive — may flag mellow or bass-heavy mixes."),
@@ -194,6 +195,22 @@ _PHASE_STEPS: list[tuple[float, str]] = [
     (95.0, "Nearly any decorrelated stereo signal will trigger this."),
 ]
 _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
+
+
+def _group_box(title: str) -> QtWidgets.QGroupBox:
+    """A QGroupBox whose title reads as a section header — larger and
+    heavier than Qt's native (small, thin) default — used for every
+    top-level section on the options page so headers are visually
+    consistent. Styles only the `::title` sub-control, not the box
+    itself, so the bump doesn't propagate to child widgets that don't
+    set their own font.
+    """
+    box = QtWidgets.QGroupBox(title)
+    box.setStyleSheet(
+        "QGroupBox::title { font-weight: 600; font-size: 12pt; "
+        "subcontrol-origin: margin; left: 4px; padding: 0 4px; }"
+    )
+    return box
 
 
 def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
@@ -277,7 +294,7 @@ def _maybe_auto_scan(api: PluginApi, file: File) -> None:
 
 class HealthOptionsPage(OptionsPage):
     NAME = "file_health"
-    TITLE = "File Health (Demo)"
+    TITLE = "File Health"
     PARENT = "plugins"
 
     def __init__(self) -> None:
@@ -291,7 +308,7 @@ class HealthOptionsPage(OptionsPage):
         auto_scan_detail.setWordWrap(True)
         layout.addWidget(auto_scan_detail)
 
-        ffmpeg_group = QtWidgets.QGroupBox("ffmpeg location", self)
+        ffmpeg_group = _group_box("ffmpeg Location")
         ffmpeg_layout = QtWidgets.QVBoxLayout(ffmpeg_group)
 
         path_row = QtWidgets.QHBoxLayout()
@@ -320,7 +337,7 @@ class HealthOptionsPage(OptionsPage):
 
         layout.addWidget(ffmpeg_group)
 
-        sensitivity_group = QtWidgets.QGroupBox("Detection Sensitivity", self)
+        sensitivity_group = _group_box("Detection Sensitivity")
         sensitivity_layout = QtWidgets.QVBoxLayout(sensitivity_group)
         sensitivity_intro = QtWidgets.QLabel(
             "Any one check below can flag a file \"Bad\" on its own, even if it sounds fine "
@@ -344,8 +361,7 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addSpacing(8)
 
         self.spectral_silence_slider = _SensitivitySlider(
-            "Missing Treble (Transcode / Fake Hi-Res)",
-            _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self,
+            "Missing Treble", _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self,
         )
         sensitivity_layout.addWidget(self.spectral_silence_slider)
         sensitivity_layout.addSpacing(8)
@@ -436,7 +452,7 @@ class ScanHealthAction(BaseAction):
     fingerprinting uses for fpcalc.
     """
 
-    TITLE = "Scan File Health (Demo)…"
+    TITLE = "Scan File Health…"
 
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
@@ -501,7 +517,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("File Health Comparison (Demo)")
+        self.setWindowTitle("File Health Comparison")
         self.setModal(False)
         self.resize(620, 380)
         self._ffmpeg_path = ffmpeg_path
@@ -778,7 +794,7 @@ class CompareHealthAction(BaseAction):
     are what actually inform that judgment.
     """
 
-    TITLE = "Compare File Health (Demo)…"
+    TITLE = "Compare File Health…"
 
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
@@ -801,7 +817,7 @@ class CompareAllHealthAction(BaseAction):
     a manual selection.
     """
 
-    TITLE = "Compare All File Health (Demo)…"
+    TITLE = "Compare All File Health…"
 
     def callback(self, objs) -> None:
         window = tagger_instance().window
@@ -991,7 +1007,7 @@ def _install_delegate_on_live_views() -> None:
 
 def enable(api: PluginApi) -> None:
     """Called when the plugin is enabled."""
-    api.logger.info("File Health (demo) enabled")
+    api.logger.info("File Health enabled")
 
     # Picard's own match_icons list is populated lazily; Picard core likely
     # already loaded it, but don't rely on load order — reusing Picard's
