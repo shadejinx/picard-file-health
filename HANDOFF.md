@@ -4,7 +4,7 @@ Session hit a context limit; this captures state for continuation in a fresh ses
 
 ## What this is
 
-A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 34 commits)
+A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 35 commits)
 that analyzes audio files for real quality defects — clipping, transcoding, phase issues,
 loudness — and surfaces them as an icon column in Picard's file/album tree, with a
 duplicate-comparison panel for deciding which copy of a matched recording is better.
@@ -79,6 +79,17 @@ history, or recreate similarly):
   `libvorbis` encoder. No real HE-AAC fixture either — no HE-AAC encoder
   available (`libfdk_aac` not compiled in); that skip path was validated via a
   synthetic `StreamInfo` instead (see commit history for the exact calls).
+- `/tmp/samplerate-test/{fake_hires_from_16k,fake_hires_96k,genuine_hires_96k}.wav`
+  — `fake_hires_from_16k.wav`: `lowpassed_16k.wav` (content only to 16kHz)
+  resampled to 96kHz via `ffmpeg -ar 96000` — clean fake-hi-res case, measured
+  -91dB above 24kHz. `genuine_hires_96k.wav`: a sine tone synthesized directly
+  at 30kHz/96kHz (Python `wave`/`struct`) — real ultrasonic content, measured
+  -14dB above 24kHz, confirms no false positive on genuine hi-res.
+  `fake_hires_96k.wav`: `wideband_noise.wav` (broadband noise with strong
+  energy right up to its own 22.05kHz Nyquist) resampled to 96kHz — an
+  adversarial edge case where highpass-filter transition-band leakage from
+  that near-Nyquist energy could plausibly cause a false negative; measured
+  -18.3dB, correctly still not gated (above the -60dB silence threshold).
 
 Always validate new ffmpeg-filter-based logic directly against real ffmpeg output
 first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsing code
@@ -86,7 +97,7 @@ first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsin
 
 ## Current real capabilities (all empirically calibrated, not guessed)
 
-Six checks in `analysis.analyze_file()`:
+Seven checks in `analysis.analyze_file()`:
 
 **Gate checks** (any one present → tier forced to "Bad"):
 1. **Clipping** — `astats` "Flat factor" > `MIN_FLAT_FACTOR_FOR_CLIPPING` (1.0).
@@ -119,6 +130,26 @@ Six checks in `analysis.analyze_file()`:
    `out_phase_start`/`out_phase_duration` directly; no manual correlation math.
    Gated on channel count ≥ 2 (derived free from counting "DC offset" occurrences
    in the already-fetched `astats` output — no extra ffprobe call).
+5. **Fake hi-res / upsampled** — same technique as check 3, parameterized
+   differently: `highpass=f=24000,volumedetect` `mean_volume` < -60dB, but only
+   evaluated when `stream_info.sample_rate > 48000` (declared "hi-res":
+   88.2/96/176.4/192kHz+) and `has_signal` (reusing the same near-silence guard
+   as check 3). A file upsampled from an ordinary-rate source has a hard wall at
+   that source's own Nyquist — resampling adds no genuinely new content — so no
+   real energy above 24kHz (chosen to sit safely past both 44.1kHz-family's
+   22.05kHz Nyquist and 48kHz-family's 24kHz Nyquist, so real CD/DVD-quality
+   masters of either family aren't penalized) means the file isn't what its
+   sample rate claims. Validated on real ffmpeg-resampled fixtures: a
+   16kHz-lowpassed 44.1kHz source resampled to 96kHz measured -91dB (silence)
+   above 24kHz (correctly gated); a genuine 96kHz file with real content
+   synthesized at 30kHz measured -14dB (correctly NOT gated); a 96kHz upsample
+   of unfiltered wideband noise (an adversarial edge case — the source has
+   strong energy right up to its own 22.05kHz Nyquist, which leaks into the
+   highpass filter's transition band) measured -18.3dB, still correctly NOT
+   gated — no false positive even on that harder case. This is a real measured
+   defect, not a proxy, so it's a gate like check 3, unlike the informational
+   bitrate-transparency check below (which infers likelihood from declared
+   codec/bitrate metadata rather than measuring the decoded signal directly).
 
 **Gradient** (only evaluated if no gate fired): a real DR14 dynamic-range
 measurement (Pleasurize Music Foundation "TT DR Meter" algorithm — non-
@@ -174,17 +205,16 @@ last scan" (caveat: whole-file, so tag edits also trigger it, not just audio cha
 
 ## Not yet built (explicit roadmap, in priority order as last discussed)
 
-1. Sample-rate scoring.
-2. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
-3. Combining the separate `ffmpeg` filter passes per file (astats, spectral
-   cutoff, loudnorm, phase, and — since this pass — DR14's own astats pass)
-   into one filtergraph (`asplit` into astats/volumedetect/loudnorm/
-   aphasemeter/DR14 branches) — pure perf optimization, not correctness.
-   `_probe_stream_info()`'s single `ffprobe` call (sample rate + codec/
-   bitrate, consolidated from what would otherwise be two separate probes)
-   is unrelated to this — ffprobe reads container metadata, not filtered
-   audio, so it's not part of the filtergraph-merge idea.
-4. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
+1. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
+2. Combining the separate `ffmpeg` filter passes per file (astats, spectral
+   cutoff, loudnorm, phase, fake-hi-res, and — since a prior pass — DR14's own
+   astats pass) into one filtergraph (`asplit` into astats/volumedetect/
+   loudnorm/aphasemeter/DR14 branches) — pure perf optimization, not
+   correctness. `_probe_stream_info()`'s single `ffprobe` call (sample rate +
+   codec/bitrate, consolidated from what would otherwise be two separate
+   probes) is unrelated to this — ffprobe reads container metadata, not
+   filtered audio, so it's not part of the filtergraph-merge idea.
+3. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
    that we decode audio anyway for the real checks — removes the false-positive
    "changed" flag on pure tag edits.
 
@@ -331,13 +361,10 @@ expected, handled outcome, not a bug, throughout `analysis.py`:
 
 ## Immediate next action if resuming heuristics work
 
-Bitrate-vs-codec-transparency scoring (item 1 of the old roadmap) is done —
-see the "Informational only" entry above. Pick up at item 1 of the current
-"not yet built" list (sample-rate scoring). Follow the same
-validate-against-real-output/primary-source-before-writing-code discipline
-used for every check so far — the bitrate-transparency numbers this item
-started with in the roadmap (MP3 256-320, AAC 192-256, Vorbis 160-192, Opus
-96-128) turned out to be rough placeholder guesses, meaningfully off from
-the actual HydrogenAudio/Xiph primary-source consensus (192/150/160/128)
-once checked — a concrete example of why this project doesn't ship a
-numeric threshold without reading the source it's attributed to.
+Sample-rate scoring (item 1 of the old roadmap) is done — see gate check 5
+above (fake hi-res / upsampled detection). Pick up at item 1 of the current
+"not yet built" list (hum/mains-noise detection). Follow the same
+validate-against-real-output-before-writing-code discipline used for every
+check so far — for hum detection that means real 50Hz/60Hz-contaminated test
+audio (synthesize a sine at exactly 50/60Hz mixed into a quiet passage) and a
+real threshold for "quiet passage" derived from measured levels, not guessed.
