@@ -270,6 +270,28 @@ _PHASE_STEPS: list[tuple[float, str]] = [
 _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
 
 
+# Shifts analysis.DR14_POOR_THRESHOLD/OK/GOOD/GREAT together (see
+# analysis.Thresholds.dr14_shift) rather than exposing four independent
+# band-boundary sliders — keeps the manual-documented relative spacing
+# between bands intact and just moves the whole scale's anchor point,
+# instead of risking the bands crossing each other or drifting apart
+# from what the TT DR Offline Meter manual actually documented.
+# Lenient (positive shift) -> strict (negative shift), matching every
+# other slider's left-to-right convention.
+_DR14_SHIFT_STEPS: list[tuple[float, str]] = [
+    (4.0, "Very lenient — even a heavily compressed 90s/2000s master (~DR4) won't read as Poor."),
+    (3.0, "Lenient — a DR5 master won't read as Poor."),
+    (2.0, "Somewhat lenient — a DR6 master won't read as Poor."),
+    (1.0, "Slightly lenient — a DR7 master won't read as Poor."),
+    (0.0, "Balanced default — matches the TT DR Offline Meter manual's own documented scale."),
+    (-1.0, "Slightly stricter — needs DR9 to clear \"Poor\"."),
+    (-2.0, "Stricter — needs DR10 to clear \"Poor\"."),
+    (-3.0, "Strict — needs DR11 to clear \"Poor\"."),
+    (-4.0, "Very strict — only real, dynamic masters (DR12+) avoid \"Poor\"."),
+]
+_DR14_SHIFT_DEFAULT_INDEX = 4  # matches analysis.Thresholds.dr14_shift default (0)
+
+
 # Comparison Priority weight-slider hints — banded (not one hint per
 # integer step) since "how important is this" doesn't have 11 distinct
 # stories the way a calibrated gate threshold does, but each band still
@@ -325,6 +347,7 @@ def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
         true_peak_dbtp=plugin_config['true_peak_dbtp'],
         spectral_silence_db=plugin_config['spectral_silence_db'],
         phase_angle_deg=plugin_config['phase_angle_deg'],
+        dr14_shift=plugin_config['dr14_shift'],
     )
 
 
@@ -478,7 +501,7 @@ class HealthOptionsPage(OptionsPage):
 
         layout.addWidget(ffmpeg_group)
 
-        layout.addWidget(_section_header("Detection Sensitivity"))
+        layout.addWidget(_section_header("File Health Sensitivity"))
         sensitivity_group, sensitivity_layout = _section_frame()
         sensitivity_intro = QtWidgets.QLabel(
             "Any one check below can flag a file \"Bad\" on its own, even if it sounds fine "
@@ -520,6 +543,32 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addLayout(sensitivity_reset_row)
 
         layout.addWidget(sensitivity_group)
+
+        layout.addWidget(_section_header("Compression Tolerance"))
+        compression_group, compression_layout = _section_frame()
+        compression_intro = QtWidgets.QLabel(
+            "Unlike the checks above, this never forces a file to \"Bad\" — it moves where "
+            "the Poor/Ok/Good/Great/Excellent line sits for how dynamic (vs. loudness-war "
+            "compressed) a master is. If you like the sound of heavily compressed 90s/2000s "
+            "masters and don't want them read as \"Poor\", loosen this.",
+            self,
+        )
+        compression_intro.setWordWrap(True)
+        compression_layout.addWidget(compression_intro)
+
+        self.dr14_shift_slider = _SensitivitySlider(
+            "Compression Tolerance", _DR14_SHIFT_STEPS, _DR14_SHIFT_DEFAULT_INDEX, fmt="{:+.0f} DR", parent=self,
+        )
+        compression_layout.addWidget(self.dr14_shift_slider)
+
+        compression_reset_row = QtWidgets.QHBoxLayout()
+        compression_reset_button = QtWidgets.QPushButton("Reset to Calibrated Default", self)
+        compression_reset_button.clicked.connect(self.dr14_shift_slider.reset_to_default)
+        compression_reset_row.addStretch(1)
+        compression_reset_row.addWidget(compression_reset_button)
+        compression_layout.addLayout(compression_reset_row)
+
+        layout.addWidget(compression_group)
 
         layout.addWidget(_section_header("Comparison Priority"))
         priority_group, priority_layout = _section_frame()
@@ -567,6 +616,7 @@ class HealthOptionsPage(OptionsPage):
         self.true_peak_slider.set_value(self.api.plugin_config['true_peak_dbtp'])
         self.spectral_silence_slider.set_value(self.api.plugin_config['spectral_silence_db'])
         self.phase_angle_slider.set_value(self.api.plugin_config['phase_angle_deg'])
+        self.dr14_shift_slider.set_value(self.api.plugin_config['dr14_shift'])
         self.rank_bandwidth_slider.set_value(self.api.plugin_config['rank_weight_bandwidth'])
         self.rank_noise_floor_slider.set_value(self.api.plugin_config['rank_weight_noise_floor'])
         self.rank_dr14_slider.set_value(self.api.plugin_config['rank_weight_dr14'])
@@ -579,6 +629,7 @@ class HealthOptionsPage(OptionsPage):
         self.api.plugin_config['true_peak_dbtp'] = self.true_peak_slider.value()
         self.api.plugin_config['spectral_silence_db'] = self.spectral_silence_slider.value()
         self.api.plugin_config['phase_angle_deg'] = self.phase_angle_slider.value()
+        self.api.plugin_config['dr14_shift'] = self.dr14_shift_slider.value()
         self.api.plugin_config['rank_weight_bandwidth'] = self.rank_bandwidth_slider.value()
         self.api.plugin_config['rank_weight_noise_floor'] = self.rank_noise_floor_slider.value()
         self.api.plugin_config['rank_weight_dr14'] = self.rank_dr14_slider.value()
@@ -1439,6 +1490,7 @@ def enable(api: PluginApi) -> None:
     api.plugin_config.register_option('true_peak_dbtp', analysis.TRUE_PEAK_THRESHOLD_DBTP)
     api.plugin_config.register_option('spectral_silence_db', analysis.SPECTRAL_SILENCE_THRESHOLD_DB)
     api.plugin_config.register_option('phase_angle_deg', analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG)
+    api.plugin_config.register_option('dr14_shift', 0.0)
     api.plugin_config.register_option('rank_weight_bandwidth', 5)
     api.plugin_config.register_option('rank_weight_noise_floor', 5)
     api.plugin_config.register_option('rank_weight_dr14', 5)
