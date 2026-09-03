@@ -12,10 +12,14 @@ gradient (Poor/Ok/Good/Great/Excellent) is set by a real DR14 dynamic-
 range measurement (Pleasurize Music Foundation "TT DR Meter" algorithm,
 reimplemented against ffmpeg's own astats filter and validated bit-for-
 bit against the open-source reference implementation — see the DR14_*
-constants below) — not the LUFS-bucket proxy this used before. Mono-
-duplicated-into-stereo is informational only, not a gate issue.
-Bitrate-vs-codec-transparency scoring, sample-rate scoring, and hum
-detection are documented future work, not implemented here yet.
+constants below) — not the LUFS-bucket proxy this used before.
+Mono-duplicated-into-stereo and below-transparency-bitrate lossy
+encoding (MP3/AAC/Vorbis/Opus, HydrogenAudio/Xiph's own published
+consensus thresholds — see TRANSPARENT_BITRATE_KBPS) are informational
+only, never gate or affect the tier: neither is a measured defect in the
+decoded signal, just statistical likelihood from declared codec/bitrate.
+Sample-rate scoring and hum detection are documented future work, not
+implemented here yet.
 """
 
 from __future__ import annotations
@@ -93,6 +97,28 @@ DR14_TOP_FRACTION = 0.2
 # common consumer sample rate, so it's replicated rather than dropped as
 # a presumed no-op historical artifact.
 DR14_SAMPLE_RATE_FUDGE_HZ = {44100: 60}
+
+# Real-world "generally transparent" bitrate floors per lossy codec —
+# HydrogenAudio/Xiph's own published listening-test consensus, not
+# guessed:
+# - MP3: "generally considered artifact-free at bitrates at/above
+#   192kbps" (Hydrogenaudio Knowledgebase, "Transparency" page).
+# - AAC: "reaches transparency in most samples and for most users at
+#   around 150 kbps" (Hydrogenaudio Knowledgebase, "Advanced Audio
+#   Coding" page) — LC profile only; HE-AAC's SBR extension is
+#   transparent at much lower bitrates and is explicitly excluded
+#   rather than checked against this (wrong, too-high) threshold, see
+#   _bitrate_transparency_note().
+# - Vorbis: "supposedly artifact-free at bitrates at/above 160kbps"
+#   (Hydrogenaudio Knowledgebase, "Transparency" page).
+# - Opus: "Opus at 128 Kb/s (VBR) is pretty much transparent" for music
+#   storage (Xiph.org's own "Opus Recommended Settings" wiki page).
+TRANSPARENT_BITRATE_KBPS = {
+    'mp3': 192,
+    'aac': 150,
+    'vorbis': 160,
+    'opus': 128,
+}
 
 FFMPEG_TIMEOUT_SECONDS = 60
 
@@ -363,21 +389,92 @@ def _read_lame_header(filename: str) -> LameHeader | None:
     return LameHeader(version=xing.lame_version_desc, lowpass_hz=lowpass or None)
 
 
-def _probe_sample_rate(ffprobe: str, filename: str) -> int | None:
-    """Only ffprobe call in the module — needed to size DR14's 3-second
-    blocks (in samples) before invoking ffmpeg's windowed astats pass.
+@dataclass
+class StreamInfo:
+    sample_rate: int | None
+    codec_name: str | None
+    profile: str | None
+    bitrate_kbps: int | None
+
+
+def _probe_stream_info(ffprobe: str, filename: str) -> StreamInfo:
+    """Single ffprobe call for everything analyze_file needs from stream
+    metadata: sample rate (DR14 block sizing) and codec/profile/bitrate
+    (transparency scoring) — one call rather than one per use, since
+    ffprobe reads container/stream headers only, not the full audio, so
+    there's no reason to invoke it twice. Any failure (unparseable
+    output, no audio stream found) yields an all-None StreamInfo; every
+    caller already treats missing fields as "can't measure this",
+    consistent with the rest of the module's graceful-degradation style.
     """
     proc = _run_subprocess(
         [
             ffprobe, '-v', 'error', '-select_streams', 'a:0',
-            '-show_entries', 'stream=sample_rate',
-            '-of', 'default=noprint_wrappers=1:nokey=1', filename,
+            '-show_entries', 'stream=codec_name,profile,sample_rate,bit_rate:format=bit_rate',
+            '-of', 'json', filename,
         ]
     )
     try:
-        return int(proc.stdout.strip())
+        data = json.loads(proc.stdout)
     except (ValueError, TypeError):
+        return StreamInfo(None, None, None, None)
+    streams = data.get('streams') or []
+    if not streams:
+        return StreamInfo(None, None, None, None)
+    stream = streams[0]
+    try:
+        sample_rate = int(stream['sample_rate'])
+    except (KeyError, ValueError, TypeError):
+        sample_rate = None
+    # Prefer the stream's own measured average bitrate — accurate for
+    # VBR, since it reflects what this specific file actually used, not
+    # a nominal target. Some containers (seen with short Opus test
+    # files) don't report a stream-level bit_rate at all; fall back to
+    # the container's overall bitrate, which includes tag/container
+    # overhead but is close enough for a "roughly how compressed is
+    # this" comparison against a coarse threshold.
+    bit_rate = stream.get('bit_rate') or (data.get('format') or {}).get('bit_rate')
+    try:
+        bitrate_kbps = int(bit_rate) // 1000
+    except (ValueError, TypeError):
+        bitrate_kbps = None
+    return StreamInfo(
+        sample_rate=sample_rate,
+        codec_name=stream.get('codec_name'),
+        profile=stream.get('profile'),
+        bitrate_kbps=bitrate_kbps,
+    )
+
+
+def _bitrate_transparency_note(stream_info: StreamInfo) -> str | None:
+    """Informational only — never gates or affects the tier. Bitrate is a
+    statistical proxy from published listening-test consensus (see
+    TRANSPARENT_BITRATE_KBPS), not a measured defect in the decoded
+    signal the way clipping/cutoff/true-peak are; a low-bitrate file
+    genuinely can sound transparent on easy material, and a
+    high-bitrate one can still have audible issues on hard material.
+    Returns None for lossless codecs, codecs without a published
+    threshold, missing bitrate data, or HE-AAC specifically (its SBR
+    extension is transparent at much lower bitrates than plain AAC-LC;
+    applying the LC threshold to it would be a wrong, not just
+    imprecise, comparison).
+    """
+    codec_name = stream_info.codec_name
+    kbps = stream_info.bitrate_kbps
+    if codec_name is None or kbps is None:
         return None
+    codec_name = codec_name.lower()
+    if codec_name == 'aac' and stream_info.profile and 'he-aac' in stream_info.profile.lower():
+        return None
+    threshold = TRANSPARENT_BITRATE_KBPS.get(codec_name)
+    if threshold is None or kbps >= threshold:
+        return None
+    label = {'mp3': 'MP3', 'aac': 'AAC', 'vorbis': 'Vorbis', 'opus': 'Opus'}[codec_name]
+    return (
+        f"{kbps}kbps {label} — below the ~{threshold}kbps commonly considered "
+        f"transparent for {label} (HydrogenAudio/Xiph consensus); may have "
+        "audible compression artifacts on some material"
+    )
 
 
 def _dr14_block_samples(sample_rate: int) -> int:
@@ -463,8 +560,7 @@ def _compute_dr14(per_channel: dict[int, tuple[list[float], list[float]]]) -> in
     return round(sum(channel_values) / len(channel_values))
 
 
-def _measure_dr14(ffmpeg: str, ffprobe: str, filename: str) -> int | None:
-    sample_rate = _probe_sample_rate(ffprobe, filename)
+def _measure_dr14(ffmpeg: str, filename: str, sample_rate: int | None) -> int | None:
     if not sample_rate:
         return None
     block_samples = _dr14_block_samples(sample_rate)
@@ -496,6 +592,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     ffmpeg = find_ffmpeg(ffmpeg_path)
     ffprobe = _find_ffprobe(ffmpeg)
     check_ffmpeg_version(ffmpeg)
+    stream_info = _probe_stream_info(ffprobe, filename)
 
     astats_stderr, astats_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
     if astats_returncode != 0:
@@ -522,6 +619,10 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
 
     issues: list[str] = []
     info: list[str] = []
+
+    bitrate_note = _bitrate_transparency_note(stream_info)
+    if bitrate_note is not None:
+        info.append(bitrate_note)
 
     has_clipping = flat_factor > MIN_FLAT_FACTOR_FOR_CLIPPING
     if has_clipping:
@@ -584,7 +685,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         # Only worth the extra ffprobe + windowed-astats pass when no gate
         # already forced "Bad" — a defective file's dynamic range doesn't
         # change its tier either way.
-        dr14 = _measure_dr14(ffmpeg, ffprobe, filename)
+        dr14 = _measure_dr14(ffmpeg, filename, stream_info.sample_rate)
 
     if issues:
         tier = "Bad"

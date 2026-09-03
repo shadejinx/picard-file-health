@@ -4,7 +4,7 @@ Session hit a context limit; this captures state for continuation in a fresh ses
 
 ## What this is
 
-A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 32 commits)
+A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 34 commits)
 that analyzes audio files for real quality defects — clipping, transcoding, phase issues,
 loudness — and surfaces them as an icon column in Picard's file/album tree, with a
 duplicate-comparison panel for deciding which copy of a matched recording is better.
@@ -68,6 +68,17 @@ history, or recreate similarly):
   matched bit-for-bit against the reference `dr14meter` PyPI tool
   (`python3 -m venv /tmp/dr14venv && /tmp/dr14venv/bin/pip install dr14meter`,
   then `dr14meter -p -n -1 -b <dir>`) before being trusted.
+- `/tmp/bitrate-test/{aac_96.m4a,aac_192.m4a,opus_64.opus,opus_160.opus}` — real
+  ffmpeg encodes (`-c:a aac`/`-c:a libopus`) of `song-a.mp3` at known bitrates,
+  above/below the AAC-LC (150kbps) and Opus (128kbps) transparency thresholds —
+  validates `_bitrate_transparency_note()`'s threshold logic and the stream-vs-
+  format bitrate fallback (Opus streams here don't report a stream-level
+  `bit_rate` in ffprobe at all — format-level is the only source). `song-c.ogg`
+  (already in the fixture set above, Vorbis 112kbps) covers the below-threshold
+  Vorbis case; no above-threshold Vorbis fixture — this ffmpeg build has no
+  `libvorbis` encoder. No real HE-AAC fixture either — no HE-AAC encoder
+  available (`libfdk_aac` not compiled in); that skip path was validated via a
+  synthetic `StreamInfo` instead (see commit history for the exact calls).
 
 Always validate new ffmpeg-filter-based logic directly against real ffmpeg output
 first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsing code
@@ -138,8 +149,24 @@ oriented compromise", DR12-14 called "more desirable") — not guessed.
 Finally puts the "Great" tier to use; it existed in `TIERS` but the old
 4-bucket LUFS gradient never produced it.
 
-**Informational only** (surfaced but never affects tier): mono content duplicated
-into both stereo channels — wasteful, not a defect.
+**Informational only** (surfaced but never affects tier — neither is a measured
+defect in the decoded signal, just a statistical proxy): mono content duplicated
+into both stereo channels (wasteful, not a defect); and, new this pass,
+below-transparency-bitrate lossy encoding. `analysis._probe_stream_info()`
+(one ffprobe call, also supplies DR14's sample rate — consolidated from two
+separate probes) reads codec_name/profile/bitrate, compared against
+`TRANSPARENT_BITRATE_KBPS` — HydrogenAudio/Xiph's own published
+listening-test consensus, fetched directly from primary sources (not the
+placeholder numbers this roadmap item started with — see below):
+MP3 192kbps, AAC(LC) 150kbps, Vorbis 160kbps, Opus 128kbps. HE-AAC
+(detected via the `profile` field containing "HE-AAC") is explicitly
+skipped rather than checked against the LC threshold — its SBR extension
+is transparent at much lower bitrates, so applying the LC number would be
+a wrong comparison, not just an imprecise one; untested against a real
+HE-AAC file since this ffmpeg build has no HE-AAC encoder (no libfdk_aac),
+so the skip logic is validated via a direct call with a synthetic
+`StreamInfo` instead. Lossless codecs and any codec without a published
+threshold are silently skipped, not guessed at.
 
 **Also real, not a "check" per se**: `analysis.content_hash()` — blake2b hash of the
 file's raw bytes, compared scan-to-scan to detect "this file's bytes changed since
@@ -147,14 +174,17 @@ last scan" (caveat: whole-file, so tag edits also trigger it, not just audio cha
 
 ## Not yet built (explicit roadmap, in priority order as last discussed)
 
-1. Bitrate-vs-codec-transparency scoring (MP3 ~256-320kbps, AAC ~192-256, Vorbis
-   ~160-192, Opus ~96-128 — HydrogenAudio/Xiph consensus reference points).
-2. Sample-rate scoring.
-3. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
-4. Combining the now-5 separate `ffmpeg`/`ffprobe` subprocess calls per file into
-   one filtergraph (`asplit` into astats/volumedetect/loudnorm/aphasemeter/DR14
-   branches) — pure perf optimization, not correctness.
-5. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
+1. Sample-rate scoring.
+2. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
+3. Combining the separate `ffmpeg` filter passes per file (astats, spectral
+   cutoff, loudnorm, phase, and — since this pass — DR14's own astats pass)
+   into one filtergraph (`asplit` into astats/volumedetect/loudnorm/
+   aphasemeter/DR14 branches) — pure perf optimization, not correctness.
+   `_probe_stream_info()`'s single `ffprobe` call (sample rate + codec/
+   bitrate, consolidated from what would otherwise be two separate probes)
+   is unrelated to this — ffprobe reads container metadata, not filtered
+   audio, so it's not part of the filtergraph-merge idea.
+4. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
    that we decode audio anyway for the real checks — removes the false-positive
    "changed" flag on pure tag edits.
 
@@ -301,7 +331,13 @@ expected, handled outcome, not a bug, throughout `analysis.py`:
 
 ## Immediate next action if resuming heuristics work
 
-Real DR14 (item 1 of the old roadmap) is done — see the "Gradient" entry above.
-Pick up at item 1 of the current "not yet built" list (bitrate-vs-codec-
-transparency scoring). Follow the same validate-against-real-output-before-
-writing-code discipline used for every check so far.
+Bitrate-vs-codec-transparency scoring (item 1 of the old roadmap) is done —
+see the "Informational only" entry above. Pick up at item 1 of the current
+"not yet built" list (sample-rate scoring). Follow the same
+validate-against-real-output/primary-source-before-writing-code discipline
+used for every check so far — the bitrate-transparency numbers this item
+started with in the roadmap (MP3 256-320, AAC 192-256, Vorbis 160-192, Opus
+96-128) turned out to be rough placeholder guesses, meaningfully off from
+the actual HydrogenAudio/Xiph primary-source consensus (192/150/160/128)
+once checked — a concrete example of why this project doesn't ship a
+numeric threshold without reading the source it's attributed to.
