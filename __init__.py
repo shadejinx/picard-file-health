@@ -49,8 +49,12 @@ from . import analysis
 TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
 
 
-class _SensitivitySlider(QtWidgets.QWidget):
+class _SensitivitySlider(QtWidgets.QFrame):
     """One labeled slider bound to an integer-scaled float gate threshold.
+
+    Rendered as its own bordered frame (title, slider, one short caption)
+    so adjacent sliders in a options-page column read as distinct
+    controls rather than a wall of unattributed hint text.
 
     QSlider is integer-only; `scale` converts between the slider's
     integer steps and the underlying float value (e.g. scale=10 gives
@@ -73,8 +77,9 @@ class _SensitivitySlider(QtWidgets.QWidget):
         self._fmt = fmt
         self._default = default
 
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
 
         header = QtWidgets.QHBoxLayout()
         title_label = QtWidgets.QLabel(title, self)
@@ -95,6 +100,10 @@ class _SensitivitySlider(QtWidgets.QWidget):
 
         detail = QtWidgets.QLabel(description, self)
         detail.setWordWrap(True)
+        muted = detail.font()
+        muted.setPointSize(max(muted.pointSize() - 1, 8))
+        detail.setFont(muted)
+        detail.setStyleSheet("color: palette(mid);")
         layout.addWidget(detail)
 
         self.set_value(default)
@@ -239,60 +248,51 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_group = QtWidgets.QGroupBox("Detection Sensitivity", self)
         sensitivity_layout = QtWidgets.QVBoxLayout(sensitivity_group)
         sensitivity_intro = QtWidgets.QLabel(
-            "The defaults below are empirically calibrated against real defective audio, "
-            "but \"measurably over a threshold\" and \"audibly bad\" aren't always the same "
-            "thing — a single reading past a boundary forces the whole file to \"Bad\", with "
-            "no other check able to override it. Loosen a slider if a check is flagging files "
-            "that sound fine to you; tighten it if it's missing real defects.",
+            "Any one check below can flag a file \"Bad\" on its own, even if it sounds fine "
+            "to you. Loosen a slider if it's flagging files that sound OK; tighten it if it's "
+            "missing real problems.",
             self,
         )
         sensitivity_intro.setWordWrap(True)
         sensitivity_layout.addWidget(sensitivity_intro)
 
         self.clip_slider = _SensitivitySlider(
-            "Clipping (Flat factor)",
-            "Higher = more tolerant of same-value sample runs before calling it clipping. "
-            "Calibrated range: clean audio measures ~0, real clipping starts around 16.",
+            "Clipping",
+            "How much flat, repeated-sample distortion counts as clipping. Lower = stricter.",
             minimum=0.1, maximum=30.0, default=analysis.MIN_FLAT_FACTOR_FOR_CLIPPING,
             scale=10, fmt="{:.1f}", parent=self,
         )
         sensitivity_layout.addWidget(self.clip_slider)
+        sensitivity_layout.addSpacing(8)
 
         self.true_peak_slider = _SensitivitySlider(
-            "True Peak (dBTP)",
-            "Higher = more tolerant of inter-sample overshoot above 0dBTP. The ITU-R "
-            "BS.1770-4 true-peak measurement method has its own documented accuracy limit "
-            "of ~0.55dB, so readings just over 0 aren't reliable evidence of real clipping.",
+            "True Peak",
+            "How far a sound can peak past full volume before it's flagged as a defect. "
+            "Higher = more tolerant.",
             minimum=-3.0, maximum=3.0, default=analysis.TRUE_PEAK_THRESHOLD_DBTP,
             scale=10, fmt="{:+.1f} dBTP", parent=self,
         )
         sensitivity_layout.addWidget(self.true_peak_slider)
+        sensitivity_layout.addSpacing(8)
 
         self.spectral_silence_slider = _SensitivitySlider(
-            "Spectral cutoff / fake hi-res",
-            "Lower (more negative) = requires more silence above the cutoff frequency "
-            "before flagging a likely transcode or fake hi-res upsample. Shared by both "
-            "checks — they're the same technique at two different frequencies.",
+            "Missing Treble (Transcode / Fake Hi-Res)",
+            "How much high-end silence counts as a lossy re-encode or fake hi-res file. "
+            "Lower = stricter.",
             minimum=-90.0, maximum=-30.0, default=analysis.SPECTRAL_SILENCE_THRESHOLD_DB,
             scale=1, fmt="{:.0f} dB", parent=self,
         )
         sensitivity_layout.addWidget(self.spectral_silence_slider)
+        sensitivity_layout.addSpacing(8)
 
         self.phase_angle_slider = _SensitivitySlider(
-            "Out-of-phase angle",
-            "Lower = flags milder phase deviation from perfect in-phase; 180\u00b0 is exact "
-            "inversion. ffmpeg's own default is 170\u00b0.",
+            "Out-of-Phase Channels",
+            "How close to fully inverted the left/right channels must be to count as "
+            "out-of-phase. Lower = stricter.",
             minimum=90.0, maximum=180.0, default=analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG,
             scale=1, fmt="{:.0f}\u00b0", parent=self,
         )
         sensitivity_layout.addWidget(self.phase_angle_slider)
-
-        reset_row = QtWidgets.QHBoxLayout()
-        reset_button = QtWidgets.QPushButton("Reset to Calibrated Defaults", self)
-        reset_button.clicked.connect(self._reset_sensitivity_defaults)
-        reset_row.addStretch(1)
-        reset_row.addWidget(reset_button)
-        sensitivity_layout.addLayout(reset_row)
 
         layout.addWidget(sensitivity_group)
         layout.addStretch(1)
