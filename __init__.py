@@ -52,6 +52,24 @@ from . import analysis
 TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
 
 
+class _NoWheelSlider(QtWidgets.QSlider):
+    """A QSlider that ignores mouse-wheel events instead of capturing
+    them.
+
+    Qt's default QSlider grabs the wheel event on hover and changes its
+    own value — inside a scrollable Options page, that means scrolling
+    silently stops and starts dragging whichever slider the cursor
+    happens to be over. Calling event.ignore() here lets Qt propagate
+    the event up to the enclosing scroll area instead, which every
+    slider on this options page should do (none of them are meant to
+    be wheel-adjustable).
+    """
+
+    def wheelEvent(self, event: QtGui.QWheelEvent | None) -> None:
+        if event is not None:
+            event.ignore()
+
+
 class _SensitivitySlider(QtWidgets.QFrame):
     """A discrete step-based slider bound to a real gate threshold.
 
@@ -100,7 +118,7 @@ class _SensitivitySlider(QtWidgets.QFrame):
         header.addWidget(self.value_label)
         layout.addLayout(header)
 
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self)
+        self.slider = _NoWheelSlider(QtCore.Qt.Orientation.Horizontal, self)
         self.slider.setMinimum(0)
         self.slider.setMaximum(len(steps) - 1)
         self.slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
@@ -172,7 +190,7 @@ class _WeightSlider(QtWidgets.QFrame):
         header.addWidget(self.value_label)
         layout.addLayout(header)
 
-        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self)
+        self.slider = _NoWheelSlider(QtCore.Qt.Orientation.Horizontal, self)
         self.slider.setMinimum(0)
         self.slider.setMaximum(10)
         self.slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
@@ -279,7 +297,7 @@ _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
 # Lenient (positive shift) -> strict (negative shift), matching every
 # other slider's left-to-right convention.
 _DR14_SHIFT_STEPS: list[tuple[float, str]] = [
-    (4.0, "Very lenient — even a heavily compressed 90s/2000s master (~DR4) won't read as Poor."),
+    (4.0, "Very lenient — a DR4 master won't read as Poor."),
     (3.0, "Lenient — a DR5 master won't read as Poor."),
     (2.0, "Somewhat lenient — a DR6 master won't read as Poor."),
     (1.0, "Slightly lenient — a DR7 master won't read as Poor."),
@@ -287,7 +305,7 @@ _DR14_SHIFT_STEPS: list[tuple[float, str]] = [
     (-1.0, "Slightly stricter — needs DR9 to clear \"Poor\"."),
     (-2.0, "Stricter — needs DR10 to clear \"Poor\"."),
     (-3.0, "Strict — needs DR11 to clear \"Poor\"."),
-    (-4.0, "Very strict — only real, dynamic masters (DR12+) avoid \"Poor\"."),
+    (-4.0, "Very strict — only DR12+ masters avoid \"Poor\"."),
 ]
 _DR14_SHIFT_DEFAULT_INDEX = 4  # matches analysis.Thresholds.dr14_shift default (0)
 
@@ -534,6 +552,12 @@ class HealthOptionsPage(OptionsPage):
             "Out-of-Phase Channels", _PHASE_STEPS, _PHASE_DEFAULT_INDEX, fmt="{:.0f}\u00b0", parent=self,
         )
         sensitivity_layout.addWidget(self.phase_angle_slider)
+        sensitivity_layout.addSpacing(8)
+
+        self.dr14_shift_slider = _SensitivitySlider(
+            "Compression Tolerance", _DR14_SHIFT_STEPS, _DR14_SHIFT_DEFAULT_INDEX, fmt="{:+.0f} DR", parent=self,
+        )
+        sensitivity_layout.addWidget(self.dr14_shift_slider)
 
         sensitivity_reset_row = QtWidgets.QHBoxLayout()
         sensitivity_reset_button = QtWidgets.QPushButton("Reset to Calibrated Defaults", self)
@@ -543,32 +567,6 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addLayout(sensitivity_reset_row)
 
         layout.addWidget(sensitivity_group)
-
-        layout.addWidget(_section_header("Compression Tolerance"))
-        compression_group, compression_layout = _section_frame()
-        compression_intro = QtWidgets.QLabel(
-            "Unlike the checks above, this never forces a file to \"Bad\" — it moves where "
-            "the Poor/Ok/Good/Great/Excellent line sits for how dynamic (vs. loudness-war "
-            "compressed) a master is. If you like the sound of heavily compressed 90s/2000s "
-            "masters and don't want them read as \"Poor\", loosen this.",
-            self,
-        )
-        compression_intro.setWordWrap(True)
-        compression_layout.addWidget(compression_intro)
-
-        self.dr14_shift_slider = _SensitivitySlider(
-            "Compression Tolerance", _DR14_SHIFT_STEPS, _DR14_SHIFT_DEFAULT_INDEX, fmt="{:+.0f} DR", parent=self,
-        )
-        compression_layout.addWidget(self.dr14_shift_slider)
-
-        compression_reset_row = QtWidgets.QHBoxLayout()
-        compression_reset_button = QtWidgets.QPushButton("Reset to Calibrated Default", self)
-        compression_reset_button.clicked.connect(self.dr14_shift_slider.reset_to_default)
-        compression_reset_row.addStretch(1)
-        compression_reset_row.addWidget(compression_reset_button)
-        compression_layout.addLayout(compression_reset_row)
-
-        layout.addWidget(compression_group)
 
         layout.addWidget(_section_header("Comparison Priority"))
         priority_group, priority_layout = _section_frame()
@@ -640,6 +638,7 @@ class HealthOptionsPage(OptionsPage):
         self.true_peak_slider.reset_to_default()
         self.spectral_silence_slider.reset_to_default()
         self.phase_angle_slider.reset_to_default()
+        self.dr14_shift_slider.reset_to_default()
 
     def _reset_priority_defaults(self) -> None:
         self.rank_bandwidth_slider.set_value(5)
