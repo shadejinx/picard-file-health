@@ -55,7 +55,14 @@ def _scan_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
     """
     try:
         result = analysis.analyze_file(filename, ffmpeg_path=ffmpeg_path)
-    except analysis.FfmpegNotFoundError as exc:
+    except (analysis.FfmpegNotFoundError, analysis.AnalysisError) as exc:
+        # FfmpegNotFoundError (incl. FfmpegVersionTooOldError): ffmpeg
+        # itself is missing/unusable — an environment problem, fixed in
+        # Options. AnalysisError: ffmpeg ran but couldn't process this
+        # specific file — every file scanned here is user-supplied and
+        # may be corrupt, truncated, or not really audio at all, so this
+        # is expected, not a bug. Either way: surfaced to the user below,
+        # never silently swallowed.
         return {'error': str(exc)}
     return {
         'tier': result.tier,
@@ -67,7 +74,18 @@ def _scan_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
 
 def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
     """Runs back on the main thread once _scan_one completes."""
-    if result and not error:
+    if error is not None:
+        # Anything _scan_one's own try/except didn't already turn into a
+        # result['error'] string — a genuine bug rather than a handled
+        # ffmpeg/input failure. Still needs to be visible: silently doing
+        # nothing here would leave the file looking permanently "pending"
+        # with no clue why, which is worse than a slightly generic message.
+        tagger_instance().window.set_statusbar_message(
+            "File Health: scan failed for %(file)s: %(error)s",
+            {'file': file.base_filename, 'error': str(error)},
+            echo=None,
+        )
+    elif result:
         if 'error' in result:
             tagger_instance().window.set_statusbar_message(
                 "File Health: %(error)s (configure ffmpeg in Options → Plugins → File Health)",
@@ -175,9 +193,28 @@ class HealthOptionsPage(OptionsPage):
         path = self.ffmpeg_path_edit.text().strip() or None
         try:
             resolved = analysis.find_ffmpeg(path)
-            self.ffmpeg_status_label.setText(f"Found: {resolved}")
         except analysis.FfmpegNotFoundError as exc:
             self.ffmpeg_status_label.setText(str(exc))
+            return
+        version = analysis.get_ffmpeg_version(resolved)
+        min_version = '.'.join(map(str, analysis.MINIMUM_FFMPEG_VERSION))
+        if version is None:
+            self.ffmpeg_status_label.setText(
+                f"Found: {resolved} (version could not be determined — scans will "
+                "still be attempted)"
+            )
+        elif version < analysis.MINIMUM_FFMPEG_VERSION:
+            found = '.'.join(map(str, version))
+            self.ffmpeg_status_label.setText(
+                "<div style='color:#c0392b;'>Found: "
+                f"{resolved} (ffmpeg {found} — <b>too old</b>. File Health needs "
+                f"ffmpeg {min_version} or newer for loudnorm/DR14/phase analysis; "
+                "scans against this binary will fail with an explanatory error. "
+                "Use Get ffmpeg… below for a current build.)</div>"
+            )
+        else:
+            found = '.'.join(map(str, version))
+            self.ffmpeg_status_label.setText(f"Found: {resolved} (ffmpeg {found} — OK)")
 
 
 class ScanHealthAction(BaseAction):

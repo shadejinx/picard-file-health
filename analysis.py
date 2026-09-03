@@ -96,9 +96,43 @@ DR14_SAMPLE_RATE_FUDGE_HZ = {44100: 60}
 
 FFMPEG_TIMEOUT_SECONDS = 60
 
+# Every filter/option this module relies on (loudnorm for True Peak/DR14's
+# gradient replacement, astats "metadata"/"reset" options + ametadata for
+# DR14 block extraction, aphasemeter for the phase check) was confirmed
+# present by reading FFmpeg's own release-tagged source directly
+# (github.com/FFmpeg/FFmpeg/blob/n3.1/libavfilter/af_astats.c — metadata/
+# reset already present at 3.1; aphasemeter landed in 2.8 per the FFmpeg
+# Changelog; loudnorm itself, the newest of the bunch, landed in 3.1) —
+# not guessed. 3.1 is therefore the real floor, not an arbitrary round
+# number.
+MINIMUM_FFMPEG_VERSION = (3, 1)
+
 
 class FfmpegNotFoundError(RuntimeError):
     """Raised when the ffmpeg binary can't be located."""
+
+
+class FfmpegVersionTooOldError(FfmpegNotFoundError):
+    """Raised when a resolved ffmpeg binary is older than
+    MINIMUM_FFMPEG_VERSION. Subclasses FfmpegNotFoundError so every
+    existing caller that already catches that one exception (the scan
+    pipeline in __init__.py) handles this the same way, with no separate
+    except clause needed anywhere.
+    """
+
+
+class AnalysisError(RuntimeError):
+    """Raised when ffmpeg/ffprobe fails outright on a given file.
+
+    Every file this plugin analyzes is user-supplied — possibly corrupt,
+    truncated, not really audio at all despite its extension, or
+    adversarially crafted — so this is an expected, handled outcome for
+    bad input, not a bug to fix. Raised only for the one call this module
+    genuinely can't proceed without (the first astats pass — see
+    analyze_file); every other ffmpeg/ffprobe call degrades gracefully
+    to "no defect detected" on failure instead of raising, via
+    _run_subprocess never raising for expected subprocess-level failures.
+    """
 
 
 def find_ffmpeg(explicit_path: str | None = None) -> str:
@@ -134,6 +168,45 @@ def _find_ffprobe(ffmpeg_path: str) -> str:
     raise FfmpegNotFoundError("ffprobe not found (expected alongside ffmpeg)")
 
 
+_FFMPEG_VERSION_RE = re.compile(r'ffmpeg version\s+n?(\d+)\.(\d+)(?:\.(\d+))?')
+
+
+def get_ffmpeg_version(ffmpeg_path: str) -> tuple[int, int] | None:
+    """Parses (major, minor) from `ffmpeg -version`'s first line.
+
+    None means "couldn't confirm" — some git/dev-snapshot builds use
+    non-numeric version strings (e.g. "N-12345-gabcdef") that don't match
+    a standard release. Treated as "let it through" by check_ffmpeg_version
+    rather than a failure: those builds are essentially always newer than
+    any numbered release, so blocking on an unparseable string would
+    reject legitimate newer installs far more often than it would ever
+    catch a genuinely too-old one.
+    """
+    proc = _run_subprocess([ffmpeg_path, '-version'])
+    m = _FFMPEG_VERSION_RE.search(proc.stdout)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def check_ffmpeg_version(ffmpeg_path: str) -> None:
+    """Raises FfmpegVersionTooOldError if the resolved binary is
+    confirmably older than MINIMUM_FFMPEG_VERSION. Called once up front
+    in analyze_file() — every check in this module needs at least one of
+    the filters gated on this floor, so there's no point running any of
+    them against a too-old binary only to get confusing partial/garbled
+    results.
+    """
+    version = get_ffmpeg_version(ffmpeg_path)
+    if version is not None and version < MINIMUM_FFMPEG_VERSION:
+        found = '.'.join(map(str, version))
+        needed = '.'.join(map(str, MINIMUM_FFMPEG_VERSION))
+        raise FfmpegVersionTooOldError(
+            f"ffmpeg {found} at {ffmpeg_path} is too old (File Health needs "
+            f"{needed} or newer for loudnorm/DR14/phase analysis)"
+        )
+
+
 def content_hash(filename: str) -> str:
     """Real hash of the file's current bytes on disk.
 
@@ -148,21 +221,56 @@ def content_hash(filename: str) -> str:
     return hasher.hexdigest()
 
 
-def _run_ffmpeg_filter(ffmpeg: str, filename: str, filter_str: str) -> str:
-    """Runs ffmpeg with a given audio filter, discarding output, returns stderr.
+def _run_subprocess(args: list[str]) -> subprocess.CompletedProcess:
+    """Every ffmpeg/ffprobe invocation in this module goes through here.
 
-    ffmpeg's analysis filters (astats, volumedetect, loudnorm) print their
-    results to stderr as a side effect of decoding — this is the standard
-    way to use them for measurement rather than transformation.
+    Every file analyzed is user-supplied — possibly corrupt, truncated,
+    adversarially crafted, or not really audio at all despite its
+    extension — so a failed subprocess is an expected, handled outcome,
+    not a crash. Timeouts and OS-level failures (binary vanished
+    mid-scan, permission race, etc.) are folded into a synthetic
+    non-zero-exit CompletedProcess rather than raised, so every existing
+    caller's "ffmpeg found nothing" parsing path — already written to
+    tolerate empty/missing output — handles them for free, with no
+    special-casing needed at most call sites. The one call this module
+    can't proceed without at all (analyze_file's first astats pass)
+    explicitly checks the returncode itself and raises AnalysisError.
+
+    `errors='replace'` guards against non-UTF8 bytes in ffmpeg's own
+    stderr (e.g. from a crafted filename or corrupt stream metadata)
+    raising UnicodeDecodeError instead of just substituting the invalid
+    bytes — a decode crash here would be exactly the kind of "malformed
+    input breaks the scanner" bug this hardening pass is for.
     """
-    proc = subprocess.run(
-        [ffmpeg, '-nostdin', '-hide_banner', '-i', filename, '-af', filter_str, '-f', 'null', '-'],
-        capture_output=True,
-        text=True,
-        timeout=FFMPEG_TIMEOUT_SECONDS,
-        check=False,
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            errors='replace',
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return subprocess.CompletedProcess(args, returncode=-1, stdout='', stderr='')
+
+
+def _run_ffmpeg_filter(ffmpeg: str, filename: str, filter_str: str) -> tuple[str, int]:
+    """Runs ffmpeg with a given audio filter, discarding output.
+
+    Returns (stderr, returncode) — ffmpeg's analysis filters (astats,
+    volumedetect, loudnorm) print their results to stderr as a side
+    effect of decoding, the standard way to use them for measurement
+    rather than transformation. Callers that can tolerate "found
+    nothing" (every filter after the first) can ignore the returncode;
+    it exists so the one call that can't (the first astats pass) can
+    tell "ffmpeg ran and found nothing" apart from "ffmpeg couldn't
+    process this file at all".
+    """
+    proc = _run_subprocess(
+        [ffmpeg, '-nostdin', '-hide_banner', '-i', filename, '-af', filter_str, '-f', 'null', '-']
     )
-    return proc.stderr
+    return proc.stderr, proc.returncode
 
 
 def _parse_astats(stderr: str) -> tuple[float, float | None]:
@@ -259,13 +367,12 @@ def _probe_sample_rate(ffprobe: str, filename: str) -> int | None:
     """Only ffprobe call in the module — needed to size DR14's 3-second
     blocks (in samples) before invoking ffmpeg's windowed astats pass.
     """
-    proc = subprocess.run(
+    proc = _run_subprocess(
         [
             ffprobe, '-v', 'error', '-select_streams', 'a:0',
             '-show_entries', 'stream=sample_rate',
             '-of', 'default=noprint_wrappers=1:nokey=1', filename,
-        ],
-        capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_SECONDS, check=False,
+        ]
     )
     try:
         return int(proc.stdout.strip())
@@ -289,16 +396,17 @@ def _run_dr14_metadata(ffmpeg: str, filename: str, block_samples: int) -> str:
     ffmpeg has no native DR14 filter, so the block-level RMS/Peak numbers
     it already knows how to compute are combined into the real DR14
     formula in Python (_compute_dr14), rather than reimplementing PCM
-    decode + windowed RMS/peak by hand.
+    decode + windowed RMS/peak by hand. A failure here (timeout, garbage
+    input) just yields empty stdout, which _parse_dr14_blocks/_compute_dr14
+    already treat the same as "nothing to measure" (dr14=None).
     """
-    proc = subprocess.run(
+    proc = _run_subprocess(
         [
             ffmpeg, '-nostdin', '-hide_banner', '-i', filename,
             '-af',
             f'asetnsamples=n={block_samples}:p=0,astats=metadata=1:reset=1,ametadata=print:file=-',
             '-f', 'null', '-',
-        ],
-        capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_SECONDS, check=False,
+        ]
     )
     return proc.stdout
 
@@ -387,17 +495,29 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     """
     ffmpeg = find_ffmpeg(ffmpeg_path)
     ffprobe = _find_ffprobe(ffmpeg)
+    check_ffmpeg_version(ffmpeg)
 
-    astats_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
+    astats_stderr, astats_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
+    if astats_returncode != 0:
+        # Every other measurement in this module depends on astats having
+        # actually decoded the file — a non-zero exit here means ffmpeg
+        # couldn't process it at all (corrupt, truncated, not really
+        # audio despite the extension, or it hit the timeout), so there's
+        # nothing trustworthy to report rather than silently defaulting
+        # to "no defects found".
+        raise AnalysisError(
+            f"ffmpeg couldn't decode {os.path.basename(filename)} as audio "
+            "(corrupt, truncated, unsupported format, or a decode timeout) — not scored"
+        )
     flat_factor, peak_db = _parse_astats(astats_stderr)
     channels = _channel_count(astats_stderr)
 
-    cutoff_stderr = _run_ffmpeg_filter(
+    cutoff_stderr, _cutoff_returncode = _run_ffmpeg_filter(
         ffmpeg, filename, f'highpass=f={SPECTRAL_CUTOFF_FREQUENCY_HZ},volumedetect'
     )
     above_cutoff_db = _parse_mean_volume(cutoff_stderr)
 
-    loudnorm_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'loudnorm=print_format=json')
+    loudnorm_stderr, _loudnorm_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'loudnorm=print_format=json')
     lufs, true_peak = _parse_loudnorm(loudnorm_stderr)
 
     issues: list[str] = []
@@ -446,7 +566,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     # Phase/channel-identity checks need two channels to compare — meaningless
     # (and aphasemeter would just misbehave) on mono source material.
     if channels >= 2:
-        phase_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'aphasemeter=video=0:phasing=1')
+        phase_stderr, _phase_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'aphasemeter=video=0:phasing=1')
         is_mono_duplicated, is_out_of_phase = _parse_phasemeter(phase_stderr)
         if is_out_of_phase:
             # A real, audible defect — will cancel out when summed to mono

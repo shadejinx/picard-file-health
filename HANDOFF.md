@@ -196,9 +196,59 @@ Explicitly dropped from scope (user decision, don't resurrect without re-asking)
 - **Options page**: auto-scan toggle + ffmpeg path config (explicit path field +
   Browse/Detect Automatically/Get ffmpeg… buttons — the last opens the official
   download page in a browser, deliberately NOT a silent auto-download-and-execute
-  of an untrusted binary). Layout is functional but not final — user said "organize
-  the options panel when we finish with all the things we're going to add", so
+  of an untrusted binary). Status label shows the resolved binary's parsed
+  version and flags it (red, bolded "too old") if below
+  `analysis.MINIMUM_FFMPEG_VERSION` (3.1 — every filter/option this plugin
+  uses confirmed present as of that release by reading FFmpeg's own
+  release-tagged source, not guessed). This is a proactive heads-up only —
+  the real enforcement is `analysis.check_ffmpeg_version()`, called at the
+  top of every `analyze_file()`, which refuses to scan at all against a
+  too-old binary (raises `FfmpegVersionTooOldError`, a subclass of
+  `FfmpegNotFoundError` so it flows through the exact same error-surfacing
+  path). Layout is functional but not final — user said "organize the
+  options panel when we finish with all the things we're going to add", so
   expect more controls to land there before a final layout pass.
+
+## Error handling / abuse-resistance (every input is user-supplied)
+
+Every file this plugin scans could be corrupt, truncated, adversarially
+crafted, or not really audio at all despite its extension — treated as an
+expected, handled outcome, not a bug, throughout `analysis.py`:
+
+- All ffmpeg/ffprobe calls go through `analysis._run_subprocess()`, which
+  never lets `subprocess.TimeoutExpired` or `OSError` (binary vanished
+  mid-scan, permission race, etc.) escape as a raw exception — folds them
+  into a synthetic failed `CompletedProcess` instead, so every existing
+  call site's "ffmpeg found nothing" parsing (already written defensively
+  throughout this module) handles them for free. Also passes
+  `errors='replace'` to guard against non-UTF8 bytes in ffmpeg's own
+  stderr raising `UnicodeDecodeError`.
+- The *first* ffmpeg call in `analyze_file()` (astats) is the one
+  exception: its returncode is checked explicitly, and a non-zero exit
+  raises `analysis.AnalysisError` — every other measurement depends on
+  astats having actually decoded the file, so silently falling through to
+  "no defects found" for a file ffmpeg couldn't even open would be a false
+  clean bill of health, not graceful degradation. Confirmed live: a text
+  file renamed `.mp3`, 1KB of `/dev/urandom` renamed `.mp3`, a truncated
+  real FLAC, and a nonexistent path all correctly raise `AnalysisError`
+  instead of scoring "Excellent" (the pre-fix behavior — genuinely
+  undecodable input has no clipping/cutoff/true-peak matches in empty
+  stderr, so every gate silently passed).
+- `AnalysisError`/`FfmpegNotFoundError` (which `FfmpegVersionTooOldError`
+  subclasses) both flow through `__init__.py`'s existing
+  `_scan_one`/`_scan_finished` error-surfacing path to a statusbar
+  message — see gotcha #6 below for a real bug this pass caught and fixed
+  in that path.
+- Minimum ffmpeg version gating (`analysis.MINIMUM_FFMPEG_VERSION = (3, 1)`,
+  `analysis.check_ffmpeg_version()`) — see the Options page entry above.
+- Accepted, documented tradeoff, not fixed: ffmpeg's own stderr for a
+  pathological file that spams warnings (e.g. "Invalid NAL unit" on
+  every corrupt frame) is still fully buffered in memory
+  (`capture_output=True`) — `-loglevel error` would suppress that, but
+  also fully suppresses the astats/loudnorm/volumedetect stat lines this
+  plugin depends on (confirmed empirically: `-loglevel error` produces
+  zero stat output). The `FFMPEG_TIMEOUT_SECONDS` (60s) bound is the only
+  cap on this, not a hard memory limit.
 
 ## Non-obvious gotchas discovered the hard way (do not re-derive, just remember)
 
@@ -233,6 +283,21 @@ Explicitly dropped from scope (user decision, don't resurrect without re-asking)
    runtime) — don't trust the API docs' method list without a live check; grep
    Picard's own source (`picard/config.py` or wherever it's defined) if something
    throws `AttributeError` on a documented-looking call.
+6. **`picard.util.thread.run_task`'s `Runnable.run()` catches every
+   `BaseException`** from the background-thread function and delivers it
+   as `error=` to the completion callback — so a raw uncaught exception in
+   `_scan_one`/`analysis.analyze_file()` was never going to crash Picard.
+   But `__init__.py`'s `_scan_finished(file, result, error)` originally
+   only handled `error is None` — any real exception that escaped
+   `_scan_one`'s own `try/except` silently did nothing but
+   `file.clear_pending()`/`file.update()`, leaving the file looking
+   permanently un-scanned with zero indication anything went wrong (only
+   visible in Picard's internal debug log via `Runnable.run()`'s own
+   `log.error(traceback.format_exc())`). Fixed by giving `_scan_finished`
+   an explicit `if error is not None:` branch that posts a statusbar
+   message — defense in depth underneath `_scan_one`'s now-broader
+   `except (FfmpegNotFoundError, AnalysisError)`, for whatever a future
+   change might still let slip through uncaught.
 
 ## Immediate next action if resuming heuristics work
 
