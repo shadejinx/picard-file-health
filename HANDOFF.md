@@ -4,7 +4,7 @@ Session hit a context limit; this captures state for continuation in a fresh ses
 
 ## What this is
 
-A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 35 commits)
+A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 36 commits)
 that analyzes audio files for real quality defects — clipping, transcoding, phase issues,
 loudness — and surfaces them as an icon column in Picard's file/album tree, with a
 duplicate-comparison panel for deciding which copy of a matched recording is better.
@@ -90,6 +90,24 @@ history, or recreate similarly):
   adversarial edge case where highpass-filter transition-band leakage from
   that near-Nyquist energy could plausibly cause a false negative; measured
   -18.3dB, correctly still not gated (above the -60dB silence threshold).
+- `/tmp/hum-test/{clean_music,hum50,hum60,bassy_no_hum}.wav` — whole-file
+  (no silence gap) synthetic fixtures used for the initial narrowband-vs-
+  control-band technique validation; superseded by the gap fixtures below
+  for the actual shipped (quiet-passage-scoped) design, kept as evidence
+  the naive whole-file version was correctly rejected (see commit history).
+- `/tmp/hum-test/{gap_no_hum,gap_hum50,gap_hum60,gap_bassnote_no_hum,
+  full_pipeline_hum,full_pipeline_clean}.wav` — synthetic fixtures with a
+  real 1.5s-playing / 1.5s-"quiet" structure (Python `wave`/`struct`).
+  `gap_hum50`/`gap_hum60`: a 50Hz/60Hz tone present throughout, including
+  the "quiet" half (classic hum signature) — correctly detected, ~14dB
+  elevation. `gap_bassnote_no_hum`: a real bass note at 50Hz that stops
+  along with the rest of the music (true silence in the second half) —
+  correctly NOT flagged, the key case the naive whole-file approach
+  couldn't distinguish from real hum. `full_pipeline_hum`/
+  `full_pipeline_clean`: wideband content (real energy up to 18kHz, passes
+  the existing spectral-cutoff gate) plus/minus the same hum signature —
+  validates the full `analyze_file()` wiring end-to-end (hum note lands in
+  `info` without touching `tier`).
 
 Always validate new ffmpeg-filter-based logic directly against real ffmpeg output
 first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsing code
@@ -97,7 +115,7 @@ first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsin
 
 ## Current real capabilities (all empirically calibrated, not guessed)
 
-Seven checks in `analysis.analyze_file()`:
+Eight checks in `analysis.analyze_file()`:
 
 **Gate checks** (any one present → tier forced to "Bad"):
 1. **Clipping** — `astats` "Flat factor" > `MIN_FLAT_FACTOR_FOR_CLIPPING` (1.0).
@@ -199,22 +217,50 @@ so the skip logic is validated via a direct call with a synthetic
 `StreamInfo` instead. Lossless codecs and any codec without a published
 threshold are silently skipped, not guessed at.
 
+**Possible mains hum** (new this pass): `analysis._detect_hum()` — a
+sustained narrow tone at 50Hz (most of the world) or 60Hz (Americas/parts
+of Asia) leaking in via ground loops/unshielded cabling/a bad power
+supply somewhere in the chain. A genuine musical note at the same
+frequency stops when the music does; hum doesn't — so this only looks
+inside ffmpeg's own `silencedetect`-identified quiet passages (where the
+*music* has dropped out, not necessarily digital silence — a real hum
+passage sits at an audible, non-trivial level, `HUM_SILENCE_THRESHOLD_DB`
+= -25dB rather than a strict silence cutoff), never the whole file,
+specifically to tell the two apart. Within the longest such passage,
+compares narrowband RMS (`bandpass=f=50:width_type=h:w=2,astats`) at the
+mains frequency against a nearby "control" frequency (55Hz/65Hz) with the
+same bandwidth — real hum shows as an outsized, narrow peak exactly at
+its own frequency (`HUM_ELEVATION_THRESHOLD_DB` = 8dB above control) and
+nowhere nearby; incidental musical content spreads more evenly. No quiet
+passage found → no claim either way (not "no hum", just "nothing to
+check against" — most loud modern masters never qualify). Validated on
+synthetic fixtures with a real playing/silent gap: hum persisting into an
+otherwise-silent passage measured ~14dB above its control band; a
+genuine bass note at the same frequency that stopped along with the rest
+of the music (the normal case) left both bands at true silence in that
+passage — clean separation, no false positive. Kept informational (like
+bitrate-transparency) rather than a gate: even with the quiet-passage
+scoping, a sustained drone/pedal note that happens to ring into a quiet
+moment is a possible (if rarer) false positive, so this is strong
+likelihood, not the kind of certainty clipping/cutoff/true-peak/fake-
+hi-res have.
+
 **Also real, not a "check" per se**: `analysis.content_hash()` — blake2b hash of the
 file's raw bytes, compared scan-to-scan to detect "this file's bytes changed since
 last scan" (caveat: whole-file, so tag edits also trigger it, not just audio changes).
 
 ## Not yet built (explicit roadmap, in priority order as last discussed)
 
-1. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
-2. Combining the separate `ffmpeg` filter passes per file (astats, spectral
-   cutoff, loudnorm, phase, fake-hi-res, and — since a prior pass — DR14's own
-   astats pass) into one filtergraph (`asplit` into astats/volumedetect/
-   loudnorm/aphasemeter/DR14 branches) — pure perf optimization, not
-   correctness. `_probe_stream_info()`'s single `ffprobe` call (sample rate +
-   codec/bitrate, consolidated from what would otherwise be two separate
-   probes) is unrelated to this — ffprobe reads container metadata, not
-   filtered audio, so it's not part of the filtergraph-merge idea.
-3. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
+1. Combining the separate `ffmpeg` filter passes per file (astats, spectral
+   cutoff, loudnorm, phase, fake-hi-res, DR14's own astats pass, and — since
+   this pass — hum detection's silencedetect + up to 4 scoped bandpass
+   passes) into one filtergraph (`asplit` into astats/volumedetect/loudnorm/
+   aphasemeter/DR14 branches) — pure perf optimization, not correctness.
+   `_probe_stream_info()`'s single `ffprobe` call (sample rate + codec/
+   bitrate, consolidated from what would otherwise be two separate probes)
+   is unrelated to this — ffprobe reads container metadata, not filtered
+   audio, so it's not part of the filtergraph-merge idea.
+2. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
    that we decode audio anyway for the real checks — removes the false-positive
    "changed" flag on pure tag edits.
 
@@ -361,10 +407,13 @@ expected, handled outcome, not a bug, throughout `analysis.py`:
 
 ## Immediate next action if resuming heuristics work
 
-Sample-rate scoring (item 1 of the old roadmap) is done — see gate check 5
-above (fake hi-res / upsampled detection). Pick up at item 1 of the current
-"not yet built" list (hum/mains-noise detection). Follow the same
-validate-against-real-output-before-writing-code discipline used for every
-check so far — for hum detection that means real 50Hz/60Hz-contaminated test
-audio (synthesize a sine at exactly 50/60Hz mixed into a quiet passage) and a
-real threshold for "quiet passage" derived from measured levels, not guessed.
+Hum/mains-noise detection (item 1 of the old roadmap) is done — see the
+"Possible mains hum" entry above. Pick up at item 1 of the current "not yet
+built" list (filtergraph consolidation) — the last remaining roadmap item,
+`content_hash()` PCM isolation, is a small self-contained fix with no
+ffmpeg-filter-validation discipline needed (just decode-and-hash instead of
+read-raw-bytes-and-hash), so either order is fine; filtergraph consolidation
+is the one that actually needs care (validate the merged multi-branch
+`asplit` filtergraph produces byte-identical stats to today's separate
+passes on every existing test fixture before trusting it, not just "looks
+right").
