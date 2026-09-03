@@ -187,12 +187,23 @@ class Thresholds:
     "no real content above a cutoff frequency" technique at two
     different frequencies, so one sensitivity knob covers both rather
     than asking the user to keep two numbers in sync.
+
+    `dr14_shift` isn't a gate at all — it moves the DR14_* band
+    boundaries below (see DR14_POOR_THRESHOLD etc.) that decide the
+    Poor/Ok/Good/Great/Excellent gradient for gate-free files. Default
+    0 matches the official TT DR Offline Meter manual's own documented
+    scale; a listener whose typical material runs a few DR points
+    lower (loudness-war-era masters) or higher than that scale's own
+    anchor can shift it to match their own listening, without
+    pretending this project has a better answer than the manual for
+    where "compressed" starts.
     """
 
     clip_flat_factor: float = MIN_FLAT_FACTOR_FOR_CLIPPING
     true_peak_dbtp: float = TRUE_PEAK_THRESHOLD_DBTP
     spectral_silence_db: float = SPECTRAL_SILENCE_THRESHOLD_DB
     phase_angle_deg: float = PHASE_OUT_OF_PHASE_ANGLE_DEG
+    dr14_shift: float = 0.0
 
 
 # Real-world DR14 quality bands, grounded in the official TT DR Offline
@@ -1266,20 +1277,24 @@ def analyze_file(
             info.append(hum_note)
         noise_floor_db = _measure_noise_floor(ffmpeg, filename, quiet_interval)
 
+    poor_threshold = DR14_POOR_THRESHOLD - thresholds.dr14_shift
+    ok_threshold = DR14_OK_THRESHOLD - thresholds.dr14_shift
+    good_threshold = DR14_GOOD_THRESHOLD - thresholds.dr14_shift
+    great_threshold = DR14_GREAT_THRESHOLD - thresholds.dr14_shift
     if issues:
         tier = "Bad"
     elif dr14 is None:
         tier = "Excellent"
-    elif dr14 < DR14_POOR_THRESHOLD:
+    elif dr14 < poor_threshold:
         tier = "Poor"
-        issues.append(f"Heavily compressed master (DR{dr14})")
-    elif dr14 < DR14_OK_THRESHOLD:
+        issues.append(f"Heavily compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
+    elif dr14 < ok_threshold:
         tier = "Ok"
-        issues.append(f"Compressed master (DR{dr14})")
-    elif dr14 < DR14_GOOD_THRESHOLD:
+        issues.append(f"Compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
+    elif dr14 < good_threshold:
         tier = "Good"
-        issues.append(f"Moderately compressed master (DR{dr14})")
-    elif dr14 < DR14_GREAT_THRESHOLD:
+        issues.append(f"Moderately compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
+    elif dr14 < great_threshold:
         tier = "Great"
     else:
         tier = "Excellent"
