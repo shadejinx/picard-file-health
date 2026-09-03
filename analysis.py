@@ -1021,6 +1021,44 @@ def _measure_dr14(ffmpeg: str, filename: str, sample_rate: int | None) -> int | 
     return _compute_dr14(per_channel)
 
 
+# Spectrogram image size — matches the compare panel's own dialog sizing;
+# see __init__.py's SpectrogramDialog.
+SPECTROGRAM_WIDTH = 900
+SPECTROGRAM_HEIGHT = 400
+
+
+def generate_spectrogram(
+    filename: str, output_path: str, ffmpeg_path: str | None = None
+) -> bool:
+    """Renders a log-frequency spectrogram PNG for `filename` to
+    `output_path` via ffmpeg's own showspectrumpic filter — on demand
+    only (a "Spectrogram" button in the compare panel), never part of
+    the regular scan pass: this is a real extra decode + image-render
+    cost per call, distinct from every other measurement in this module
+    which reuses the one merged decode.
+
+    Doesn't compute or judge anything itself — the point is letting the
+    user see the same evidence the numeric checks above already
+    measured (a cutoff wall, an elevated noise floor, asymmetric
+    stereo content) in one glance, the same way this project's own
+    research turned up as standing advice from comparable tools: "always
+    confirm a flagged file by eyeballing its spectrogram" rather than
+    trusting a single number. `-update 1` (write the same file path
+    every frame, keep only the last) is required by ffmpeg's image2
+    muxer for a single-image PNG output; confirmed empirically that
+    -frames:v 1 alone works too but leaves ffmpeg's own advisory warning
+    in stderr about needing this flag.
+    """
+    ffmpeg = find_ffmpeg(ffmpeg_path)
+    args = [
+        ffmpeg, '-nostdin', '-hide_banner', '-y', '-i', filename,
+        '-lavfi', f'showspectrumpic=s={SPECTROGRAM_WIDTH}x{SPECTROGRAM_HEIGHT}:mode=combined:legend=1:scale=log',
+        '-update', '1', output_path,
+    ]
+    proc = _run_subprocess(args)
+    return proc.returncode == 0 and os.path.exists(output_path)
+
+
 @dataclass
 class AnalysisResult:
     tier: str
