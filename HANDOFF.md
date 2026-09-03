@@ -4,7 +4,7 @@ Session hit a context limit; this captures state for continuation in a fresh ses
 
 ## What this is
 
-A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 26 commits)
+A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 30 commits)
 that analyzes audio files for real quality defects — clipping, transcoding, phase issues,
 loudness — and surfaces them as an icon column in Picard's file/album tree, with a
 duplicate-comparison panel for deciding which copy of a matched recording is better.
@@ -55,6 +55,11 @@ history, or recreate similarly):
 - `/tmp/real_stereo.wav`, `/tmp/fake_stereo_mono_dup.wav`, `/tmp/phase_inverted.wav` —
   independent-channel / mono-duplicated / phase-inverted noise — validates phase
   correlation detection.
+- `/tmp/health-demo-files/{wideband_v0,transcode_v0,honest_96,honest_forced_lowpass,
+  honest_low_lowpass}.mp3` — real `lame`-CLI encodes (not ffmpeg's `libmp3lame`
+  wrapper, which doesn't write a parseable LAME tag) at known settings (`-V0`,
+  `--lowpass N`, plain CBR) of `wideband_noise.wav`/`lowpassed_16k.wav` — validates
+  the LAME-header low-pass cross-check's decisive-vs-heuristic-only boundary.
 
 Always validate new ffmpeg-filter-based logic directly against real ffmpeg output
 first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsing code
@@ -77,6 +82,20 @@ Six checks in `analysis.analyze_file()`:
    peak) — a near-silent file trivially has "no content above 17kHz" for the same
    reason it has no content anywhere; this guard was added after the check
    false-positived on Picard's own tiny test fixture live during testing.
+
+   **LAME header cross-check** (added on top of the above): when the file has a
+   LAME encoder tag (`analysis._read_lame_header()`, parses the embedded
+   Info/Xing frame per http://gabriel.mp3-tech.org/mp3infotag.html, via
+   `mutagen.mp3` — bundled with Picard, no new dependency), and LAME's own
+   recorded low-pass filter value is *above* 17kHz, the "likely transcoded"
+   wording upgrades to "Confirmed transcode" — LAME's own filter can't
+   explain the missing content, so the source was already lossy before this
+   encode. Validated against real `lame`-CLI-encoded fixtures (`-V0`,
+   `--lowpass N`), not just ffmpeg's `libmp3lame` wrapper — that wrapper
+   writes its own `"Lavc…"` version string instead of `"LAME…"`, so it
+   never has the extended tag this check needs; only genuinely LAME-encoded
+   files get the upgrade, everything else silently falls back to the
+   existing heuristic wording.
 4. **Out-of-phase channels** — ffmpeg's own `aphasemeter=phasing=1` mode reports
    `out_phase_start`/`out_phase_duration` directly; no manual correlation math.
    Gated on channel count ≥ 2 (derived free from counting "DC offset" occurrences
@@ -98,16 +117,14 @@ last scan" (caveat: whole-file, so tag edits also trigger it, not just audio cha
 ## Not yet built (explicit roadmap, in priority order as last discussed)
 
 1. Real DR14 (block-based peak-vs-RMS dynamic range) — replace the coarse LUFS proxy.
-2. LAME header inspection (MP3-specific) — decisive transcode evidence straight from
-   the encoder's own embedded settings, no heuristic guessing needed when present.
-3. Bitrate-vs-codec-transparency scoring (MP3 ~256-320kbps, AAC ~192-256, Vorbis
+2. Bitrate-vs-codec-transparency scoring (MP3 ~256-320kbps, AAC ~192-256, Vorbis
    ~160-192, Opus ~96-128 — HydrogenAudio/Xiph consensus reference points).
-4. Sample-rate scoring.
-5. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
-6. Combining the now-4 separate `ffmpeg` subprocess calls per file into one
+3. Sample-rate scoring.
+4. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
+5. Combining the now-4 separate `ffmpeg` subprocess calls per file into one
    filtergraph (`asplit` into astats/volumedetect/loudnorm/aphasemeter branches) —
    pure perf optimization, not correctness.
-7. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
+6. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
    that we decode audio anyway for the real checks — removes the false-positive
    "changed" flag on pure tag edits.
 
@@ -184,6 +201,11 @@ Explicitly dropped from scope (user decision, don't resurrect without re-asking)
 
 ## Immediate next action if resuming heuristics work
 
-Pick up at item 1 or 2 of the "not yet built" list above (real DR14, or LAME header
-inspection) — both were queued but not started. Follow the same validate-against-
-real-ffmpeg-output-before-writing-code discipline used for every check so far.
+LAME header inspection (item 2 of the old roadmap) is done — see the "Spectral
+cutoff / likely transcode" entry above. Pick up at item 1 of the current "not
+yet built" list (real DR14, block-based peak-vs-RMS dynamic range, replacing
+the coarse LUFS proxy). Follow the same validate-against-real-output-before-
+writing-code discipline used for every check so far — for DR14 that means a
+known-DR-value reference file (e.g. from a published DR database) or a
+synthesized signal with a hand-computed expected DR value, not just "looks
+reasonable."
