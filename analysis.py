@@ -111,6 +111,40 @@ MIN_FLAT_FACTOR_FOR_CLIPPING = 1.0
 # those margins are unaffected by this change.
 TRUE_PEAK_THRESHOLD_DBTP = 0.6
 
+# Degrees of phase-angle deviation from perfectly in-phase (180° = exact
+# inversion) required before aphasemeter's own out-of-phase detector
+# fires. Previously left implicit (ffmpeg's own default of 170°, from
+# aphasemeter's `angle` option — a fairly narrow band near total
+# inversion already); made explicit here so it's the same kind of named,
+# overridable constant as every other gate threshold, not one silently
+# inherited from ffmpeg's own defaults.
+PHASE_OUT_OF_PHASE_ANGLE_DEG = 170.0
+
+
+@dataclass
+class Thresholds:
+    """Every gate check's sensitivity, in one place, overridable per call.
+
+    Defaults mirror the module-level constants above — those constants
+    remain the single source of truth for the empirically-calibrated
+    starting point; this dataclass exists so a caller (the Options page)
+    can override any subset without touching module state, since
+    analyze_file() may run concurrently on Picard's background-thread
+    pool and mutable globals would race across files scanned at once.
+
+    `spectral_silence_db` deliberately covers both the spectral-cutoff/
+    transcode check and the fake-hi-res check — they're the same
+    "no real content above a cutoff frequency" technique at two
+    different frequencies, so one sensitivity knob covers both rather
+    than asking the user to keep two numbers in sync.
+    """
+
+    clip_flat_factor: float = MIN_FLAT_FACTOR_FOR_CLIPPING
+    true_peak_dbtp: float = TRUE_PEAK_THRESHOLD_DBTP
+    spectral_silence_db: float = SPECTRAL_SILENCE_THRESHOLD_DB
+    phase_angle_deg: float = PHASE_OUT_OF_PHASE_ANGLE_DEG
+
+
 # Real-world DR14 quality bands, grounded in the official TT DR Offline
 # Meter manual's own documented color scale (red below DR8, green at
 # DR14+, yellow in between) and its worked examples (DR9 called a
@@ -407,7 +441,7 @@ def _filter_instance_output(stderr: str, tag: str) -> str:
 
 
 def _run_merged_analysis(
-    ffmpeg: str, filename: str, include_phase_check: bool, include_hires_check: bool
+    ffmpeg: str, filename: str, include_phase_check: bool, include_hires_check: bool, phase_angle_deg: float
 ) -> tuple[str, int]:
     """One ffmpeg invocation, one decode, for every whole-file measurement
     that doesn't need another measurement's result first: clipping/peak
@@ -445,7 +479,7 @@ def _run_merged_analysis(
         (None, 'loudnorm=print_format=json'),
     ]
     if include_phase_check:
-        branches.append((None, 'aphasemeter=video=0:phasing=1'))
+        branches.append((None, f'aphasemeter=video=0:phasing=1:angle={phase_angle_deg}'))
     if include_hires_check:
         branches.append(('hires', f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect@hires'))
 
@@ -816,7 +850,9 @@ class AnalysisResult:
     dr14: int | None
 
 
-def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResult:
+def analyze_file(
+    filename: str, ffmpeg_path: str | None = None, thresholds: Thresholds | None = None
+) -> AnalysisResult:
     """Runs on a background thread — real decode + measurement work, not
     instant. Every whole-file measurement that doesn't depend on another
     measurement's result first runs in one merged ffmpeg invocation (see
@@ -825,7 +861,13 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     passes: both are only worth running when no gate has already fired,
     a real cost this function still avoids paying on a file that's
     already "Bad" for an unrelated, definitively measured reason.
+
+    `thresholds` defaults to the empirically-calibrated Thresholds()
+    values when omitted — callers (the Options page sliders) override
+    per scan rather than mutating module state, since scans may run
+    concurrently across several files on Picard's background-thread pool.
     """
+    thresholds = thresholds or Thresholds()
     ffmpeg = find_ffmpeg(ffmpeg_path)
     ffprobe = _find_ffprobe(ffmpeg)
     check_ffmpeg_version(ffmpeg)
@@ -840,7 +882,11 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     is_hires = stream_info.sample_rate is not None and stream_info.sample_rate > FAKE_HIRES_MIN_SAMPLE_RATE_HZ
 
     merged_stderr, merged_returncode = _run_merged_analysis(
-        ffmpeg, filename, include_phase_check=channels >= 2, include_hires_check=is_hires
+        ffmpeg,
+        filename,
+        include_phase_check=channels >= 2,
+        include_hires_check=is_hires,
+        phase_angle_deg=thresholds.phase_angle_deg,
     )
     if merged_returncode != 0:
         # Every measurement in this module depends on the same decode
@@ -864,11 +910,11 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     if bitrate_note is not None:
         info.append(bitrate_note)
 
-    has_clipping = flat_factor > MIN_FLAT_FACTOR_FOR_CLIPPING
+    has_clipping = flat_factor > thresholds.clip_flat_factor
     if has_clipping:
         issues.append("Clipping detected")
 
-    has_true_peak_overs = true_peak is not None and true_peak >= TRUE_PEAK_THRESHOLD_DBTP
+    has_true_peak_overs = true_peak is not None and true_peak >= thresholds.true_peak_dbtp
     if has_true_peak_overs and not has_clipping:
         # Only report separately when Flat factor didn't already catch a
         # defect — both signals pointing at "this file clips" is redundant
@@ -878,7 +924,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
 
     has_signal = peak_db is not None and peak_db > MIN_PEAK_DB_FOR_SPECTRAL_CHECK
     has_cutoff = (
-        has_signal and above_cutoff_db is not None and above_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB
+        has_signal and above_cutoff_db is not None and above_cutoff_db < thresholds.spectral_silence_db
     )
     lame_lowpass_hz: int | None = None
     if has_cutoff:
@@ -912,7 +958,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         # near-silent hi-res-rate file trivially has "no content above
         # 24kHz" for the same reason it has no content anywhere.
         above_hires_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'hires'))
-        if above_hires_cutoff_db is not None and above_hires_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB:
+        if above_hires_cutoff_db is not None and above_hires_cutoff_db < thresholds.spectral_silence_db:
             # A real measured defect, not a guess: genuine content captured
             # at this sample rate would extend past the check frequency
             # (see FAKE_HIRES_CHECK_FREQUENCY_HZ for the validated margin);
