@@ -4,28 +4,37 @@ Every threshold/formula here was empirically validated against real ffmpeg
 output before being written (see the plugin's development history) — not
 guessed from documentation. Gate checks implemented (force tier "Bad"):
 clipping (astats Flat factor, calibrated threshold), True Peak
-inter-sample overs, spectral-cutoff/transcode detection, and out-of-phase
-channels. A coarse LUFS-based loudness gradient (Poor/Ok/Good/Excellent)
-approximates "how squashed the master might be" against real industry
-loudness norms (streaming ~-14 LUFS integrated, EBU R128 broadcast ~-23
-LUFS, "loudness war" masters ~-8 LUFS or louder) — explicitly NOT a true
-DR14 dynamic-range measurement, which needs block-based peak-vs-RMS
-analysis. Mono-duplicated-into-stereo is informational only, not a gate
-issue. Real DR14, bitrate-vs-codec-transparency scoring, sample-rate
-scoring, hum detection, and LAME-header inspection are documented future
-work, not implemented here yet.
+inter-sample overs, spectral-cutoff/transcode detection (confirmed, when
+the file has one, against the LAME encoder's own embedded low-pass
+setting — decisive rather than heuristic evidence of a prior lossy
+generation), and out-of-phase channels. A coarse LUFS-based loudness
+gradient (Poor/Ok/Good/Excellent) approximates "how squashed the master
+might be" against real industry loudness norms (streaming ~-14 LUFS
+integrated, EBU R128 broadcast ~-23 LUFS, "loudness war" masters ~-8
+LUFS or louder) — explicitly NOT a true DR14 dynamic-range measurement,
+which needs block-based peak-vs-RMS analysis. Mono-duplicated-into-stereo
+is informational only, not a gate issue. Real DR14,
+bitrate-vs-codec-transparency scoring, sample-rate scoring, and hum
+detection are documented future work, not implemented here yet.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 
+from mutagen.mp3 import (
+    HeaderNotFoundError,
+    MPEGFrame,
+    XingHeader,
+    XingHeaderError,
+    skip_id3,
+)
 
 # Below this level (relative to full scale), content above the cutoff
 # frequency is considered "not really there" — empirically, a genuinely
@@ -173,6 +182,45 @@ def _parse_phasemeter(stderr: str) -> tuple[bool, bool]:
 
 
 @dataclass
+class LameHeader:
+    version: str
+    lowpass_hz: int | None
+
+
+def _read_lame_header(filename: str) -> LameHeader | None:
+    """Reads the LAME encoder's own embedded Info/Xing tag from the first
+    MP3 frame, per the "Mp3 Info Tag rev1" spec
+    (http://gabriel.mp3-tech.org/mp3infotag.html) — byte $A6 is the exact
+    low-pass filter frequency (Hz/100) LAME itself applied for this
+    specific encode, not a guess derived from bitrate tables. Uses
+    mutagen's frame/Xing parser (bundled with Picard, same library Picard
+    core already uses for every format's tag reading) rather than
+    hand-rolled bit parsing — validated against files produced by the
+    real `lame` CLI at known settings (`-V0`, `--lowpass N`) before this
+    was wired into analyze_file().
+
+    None means "no usable LAME tag" — not present (many valid MP3s have
+    none, e.g. non-LAME encoders or a stripped tag), the wrong frame type,
+    or a truncated/corrupt header. Absence is not itself a defect.
+    """
+    try:
+        with open(filename, 'rb') as fh:
+            skip_id3(fh)
+            frame = MPEGFrame(fh)
+            if frame.layer != 3:
+                return None
+            offset = XingHeader.get_offset(frame)
+            fh.seek(frame.frame_offset + offset, 0)
+            xing = XingHeader(fh)
+    except (HeaderNotFoundError, XingHeaderError, OSError):
+        return None
+    if xing.lame_header is None:
+        return None
+    lowpass = xing.lame_header.lowpass_filter
+    return LameHeader(version=xing.lame_version_desc, lowpass_hz=lowpass or None)
+
+
+@dataclass
 class AnalysisResult:
     tier: str
     issues: list[str]
@@ -182,6 +230,7 @@ class AnalysisResult:
     true_peak_dbtp: float | None
     clipping_flat_factor: float
     spectral_energy_above_cutoff_db: float | None
+    lame_lowpass_hz: int | None
 
 
 def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResult:
@@ -223,11 +272,29 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     has_cutoff = (
         has_signal and above_cutoff_db is not None and above_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB
     )
+    lame_lowpass_hz: int | None = None
     if has_cutoff:
-        issues.append(
-            f"No real content above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz "
-            "(likely transcoded from a lossy source)"
-        )
+        lame_header = _read_lame_header(filename)
+        if lame_header is not None:
+            lame_lowpass_hz = lame_header.lowpass_hz
+        if lame_lowpass_hz is not None and lame_lowpass_hz > SPECTRAL_CUTOFF_FREQUENCY_HZ:
+            # Decisive, not heuristic: the LAME encoder's own recorded
+            # low-pass setting (read straight from its embedded Info tag,
+            # not guessed from a bitrate table) let content through well
+            # past our check frequency — so this encode's own filtering
+            # cannot explain the measured silence up there. The source
+            # feeding this encode was already missing that content.
+            issues.append(
+                f"Confirmed transcode: LAME's own settings allowed content up to "
+                f"{lame_lowpass_hz / 1000:.1f}kHz through unfiltered, but none exists "
+                f"above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz — the source was "
+                "already lossy before this encode"
+            )
+        else:
+            issues.append(
+                f"No real content above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz "
+                "(likely transcoded from a lossy source)"
+            )
 
     # Phase/channel-identity checks need two channels to compare — meaningless
     # (and aphasemeter would just misbehave) on mono source material.
@@ -270,4 +337,5 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         true_peak_dbtp=true_peak,
         clipping_flat_factor=flat_factor,
         spectral_energy_above_cutoff_db=above_cutoff_db,
+        lame_lowpass_hz=lame_lowpass_hz,
     )
