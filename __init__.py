@@ -137,6 +137,56 @@ class _SensitivitySlider(QtWidgets.QFrame):
         self.slider.setValue(self._default_index)
 
 
+class _WeightSlider(QtWidgets.QFrame):
+    """A plain 0-10 importance slider for one axis of the compare
+    panel's weighted tie-break (_composite_winner in this module).
+
+    Simpler than _SensitivitySlider — no per-step hints needed, since
+    "how important is this axis to you" doesn't carry the same
+    gate-specific meaning per position that a detection threshold does.
+    0 means the axis is ignored entirely.
+    """
+
+    def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(2)
+
+        header = QtWidgets.QHBoxLayout()
+        title_label = QtWidgets.QLabel(title, self)
+        title_label.setWordWrap(False)
+        bold = title_label.font()
+        bold.setBold(True)
+        title_label.setFont(bold)
+        self.value_label = QtWidgets.QLabel(self)
+        header.addWidget(title_label)
+        header.addStretch(1)
+        header.addWidget(self.value_label)
+        layout.addLayout(header)
+
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(10)
+        self.slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
+        self.slider.setTickInterval(1)
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(1)
+        self.slider.valueChanged.connect(self._on_changed)
+        layout.addWidget(self.slider)
+
+        self.set_value(5)
+
+    def _on_changed(self, value: int) -> None:
+        self.value_label.setText("Ignored" if value == 0 else f"{value}/10")
+
+    def value(self) -> int:
+        return self.slider.value()
+
+    def set_value(self, value: int) -> None:
+        self.slider.setValue(value)
+
+
 # Each gate's sensitivity slider has 10 hand-picked, non-linear steps —
 # grounded in analysis.py's own calibration data (see the cited margins
 # in each list) rather than an even split of the numeric range, since
@@ -236,6 +286,15 @@ def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
     )
 
 
+def _rank_weights_from_config(plugin_config) -> dict[str, int]:
+    return {
+        'rank_weight_bandwidth': plugin_config['rank_weight_bandwidth'],
+        'rank_weight_noise_floor': plugin_config['rank_weight_noise_floor'],
+        'rank_weight_dr14': plugin_config['rank_weight_dr14'],
+        'rank_weight_coherence': plugin_config['rank_weight_coherence'],
+    }
+
+
 def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thresholds) -> dict[str, object]:
     """Runs on a background thread — real decode + measurement work via
     ffmpeg (see analysis.py), not simulated.
@@ -256,7 +315,29 @@ def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thres
         'flags': "; ".join(result.issues),
         'info': "; ".join(result.info),
         'content_hash': result.content_hash,
+        'bandwidth_hz': result.spectral_bandwidth_hz,
+        'noise_floor_db': result.noise_floor_db,
+        'dr14': result.dr14,
+        'stereo_coherence': result.stereo_coherence,
     }
+
+
+def _encode_metric(value: float | None) -> str:
+    """Metadata tags are text — a plain str() round-trips cleanly through
+    float()/int() on read, and an empty string means "not measured"
+    (distinct from a real 0.0/0), consistent with how every other
+    optional field on this file's metadata already handles "unknown".
+    """
+    return '' if value is None else str(value)
+
+
+def _decode_metric(raw: str) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
@@ -287,6 +368,10 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
             file.metadata['~health_info'] = result['info']
             file.metadata['~health_content_hash'] = result['content_hash']
             file.metadata['~health_changed_since_scan'] = '1' if changed else ''
+            file.metadata['~health_bandwidth_hz'] = _encode_metric(result['bandwidth_hz'])
+            file.metadata['~health_noise_floor_db'] = _encode_metric(result['noise_floor_db'])
+            file.metadata['~health_dr14'] = _encode_metric(result['dr14'])
+            file.metadata['~health_stereo_coherence'] = _encode_metric(result['stereo_coherence'])
     file.clear_pending()
     file.update()
 
@@ -385,7 +470,51 @@ class HealthOptionsPage(OptionsPage):
         )
         sensitivity_layout.addWidget(self.phase_angle_slider)
 
+        sensitivity_reset_row = QtWidgets.QHBoxLayout()
+        sensitivity_reset_button = QtWidgets.QPushButton("Reset to Calibrated Defaults", self)
+        sensitivity_reset_button.clicked.connect(self._reset_sensitivity_defaults)
+        sensitivity_reset_row.addStretch(1)
+        sensitivity_reset_row.addWidget(sensitivity_reset_button)
+        sensitivity_layout.addLayout(sensitivity_reset_row)
+
         layout.addWidget(sensitivity_group)
+
+        layout.addWidget(_section_header("Comparison Priority"))
+        priority_group, priority_layout = _section_frame()
+        priority_intro = QtWidgets.QLabel(
+            "When two files score the same tier, the compare panel breaks the tie using "
+            "these weights — each axis only contributes its relative rank among the tied "
+            "files (1st, 2nd, ...), scaled by its weight here, never a raw number "
+            "combined across unrelated units. Set a weight to 0 to ignore that axis "
+            "entirely.",
+            self,
+        )
+        priority_intro.setWordWrap(True)
+        priority_layout.addWidget(priority_intro)
+
+        self.rank_bandwidth_slider = _WeightSlider("Bandwidth", parent=self)
+        priority_layout.addWidget(self.rank_bandwidth_slider)
+        priority_layout.addSpacing(8)
+
+        self.rank_noise_floor_slider = _WeightSlider("Noise Floor", parent=self)
+        priority_layout.addWidget(self.rank_noise_floor_slider)
+        priority_layout.addSpacing(8)
+
+        self.rank_dr14_slider = _WeightSlider("Dynamic Range", parent=self)
+        priority_layout.addWidget(self.rank_dr14_slider)
+        priority_layout.addSpacing(8)
+
+        self.rank_coherence_slider = _WeightSlider("Stereo Coherence", parent=self)
+        priority_layout.addWidget(self.rank_coherence_slider)
+
+        priority_reset_row = QtWidgets.QHBoxLayout()
+        priority_reset_button = QtWidgets.QPushButton("Reset to Equal Weights", self)
+        priority_reset_button.clicked.connect(self._reset_priority_defaults)
+        priority_reset_row.addStretch(1)
+        priority_reset_row.addWidget(priority_reset_button)
+        priority_layout.addLayout(priority_reset_row)
+
+        layout.addWidget(priority_group)
         layout.addStretch(1)
 
     def load(self) -> None:
@@ -396,6 +525,10 @@ class HealthOptionsPage(OptionsPage):
         self.true_peak_slider.set_value(self.api.plugin_config['true_peak_dbtp'])
         self.spectral_silence_slider.set_value(self.api.plugin_config['spectral_silence_db'])
         self.phase_angle_slider.set_value(self.api.plugin_config['phase_angle_deg'])
+        self.rank_bandwidth_slider.set_value(self.api.plugin_config['rank_weight_bandwidth'])
+        self.rank_noise_floor_slider.set_value(self.api.plugin_config['rank_weight_noise_floor'])
+        self.rank_dr14_slider.set_value(self.api.plugin_config['rank_weight_dr14'])
+        self.rank_coherence_slider.set_value(self.api.plugin_config['rank_weight_coherence'])
 
     def save(self) -> None:
         self.api.plugin_config['auto_scan'] = self.auto_scan_checkbox.isChecked()
@@ -404,12 +537,22 @@ class HealthOptionsPage(OptionsPage):
         self.api.plugin_config['true_peak_dbtp'] = self.true_peak_slider.value()
         self.api.plugin_config['spectral_silence_db'] = self.spectral_silence_slider.value()
         self.api.plugin_config['phase_angle_deg'] = self.phase_angle_slider.value()
+        self.api.plugin_config['rank_weight_bandwidth'] = self.rank_bandwidth_slider.value()
+        self.api.plugin_config['rank_weight_noise_floor'] = self.rank_noise_floor_slider.value()
+        self.api.plugin_config['rank_weight_dr14'] = self.rank_dr14_slider.value()
+        self.api.plugin_config['rank_weight_coherence'] = self.rank_coherence_slider.value()
 
     def _reset_sensitivity_defaults(self) -> None:
         self.clip_slider.reset_to_default()
         self.true_peak_slider.reset_to_default()
         self.spectral_silence_slider.reset_to_default()
         self.phase_angle_slider.reset_to_default()
+
+    def _reset_priority_defaults(self) -> None:
+        self.rank_bandwidth_slider.set_value(5)
+        self.rank_noise_floor_slider.set_value(5)
+        self.rank_dr14_slider.set_value(5)
+        self.rank_coherence_slider.set_value(5)
 
     def _browse_ffmpeg(self) -> None:
         path, _filter = QtWidgets.QFileDialog.getOpenFileName(self, "Locate ffmpeg")
@@ -513,6 +656,97 @@ def _tier_rank(file: File) -> int:
         return -1
 
 
+def _read_metric(file: File, key: str) -> float | None:
+    return _decode_metric(file.metadata[key] or '')
+
+
+# (metadata key, plugin_config weight key, higher-value-is-better)
+_RANK_AXES: tuple[tuple[str, str, bool], ...] = (
+    ('~health_bandwidth_hz', 'rank_weight_bandwidth', True),
+    ('~health_noise_floor_db', 'rank_weight_noise_floor', False),
+    ('~health_dr14', 'rank_weight_dr14', True),
+    ('~health_stereo_coherence', 'rank_weight_coherence', True),
+)
+
+
+def _composite_winner(files: list[File], rank_weights: dict[str, int]) -> File | None:
+    """Weighted rank-sum (Borda count) tie-break among tier-tied files.
+
+    Deliberately NOT a single weighted score combining raw Hz/dB/DR-point/
+    correlation values — that would need arbitrary unit-conversion
+    factors this project has no defensible basis for (bandwidth is in
+    Hz, noise floor in dB, dynamic range in DR-points, coherence a
+    [-1,1] ratio; there's no principled way to say "1kHz of bandwidth is
+    worth how many dB of noise floor"). Each axis instead only
+    contributes each file's *relative rank position within this group*
+    — 1st place, 2nd place, etc. — scaled by the user's own importance
+    weight for that axis, so no unit conversion is ever needed.
+
+    A file missing a measurement on some axis gets the worst possible
+    rank on that axis (one past the last measured file), so missing
+    data never accidentally looks best. An axis is skipped entirely
+    when its weight is 0 or fewer than two files in the group have a
+    value for it — nothing to legitimately compare.
+
+    Returns None when no axis contributed anything, or when the
+    weighted totals still end in an exact tie — this plugin's standing
+    policy is to not declare a winner without a real signal to back it.
+    """
+    if len(files) < 2:
+        return None
+    scores: dict[File, float] = dict.fromkeys(files, 0.0)
+    any_axis_used = False
+    for metadata_key, weight_key, higher_is_better in _RANK_AXES:
+        weight = rank_weights.get(weight_key, 0)
+        if weight <= 0:
+            continue
+        measured = {f: v for f in files if (v := _read_metric(f, metadata_key)) is not None}
+        if len(measured) < 2:
+            continue
+        any_axis_used = True
+        ordered = sorted(measured, key=lambda f: measured[f], reverse=higher_is_better)
+        for rank_index, f in enumerate(ordered, start=1):
+            scores[f] += rank_index * weight
+        worst_rank = len(ordered) + 1
+        for f in files:
+            if f not in measured:
+                scores[f] += worst_rank * weight
+    if not any_axis_used:
+        return None
+    best_score = min(scores.values())
+    winners = [f for f, s in scores.items() if s == best_score]
+    return winners[0] if len(winners) == 1 else None
+
+
+_RANK_LABELS: dict[str, str] = {
+    'rank_weight_bandwidth': "Bandwidth",
+    'rank_weight_noise_floor': "Noise floor",
+    'rank_weight_dr14': "Dynamic range",
+    'rank_weight_coherence': "Stereo coherence",
+}
+
+
+def _rank_explanation(files: list[File], rank_weights: dict[str, int]) -> str:
+    """Plain-text breakdown of the values the weighted tie-break actually
+    used, attached as the winning row's tooltip — a rank position is
+    never shown without the numbers behind it.
+    """
+    lines: list[str] = []
+    for metadata_key, weight_key, _higher in _RANK_AXES:
+        weight = rank_weights.get(weight_key, 0)
+        if weight <= 0:
+            continue
+        values = [(f.base_filename, _read_metric(f, metadata_key)) for f in files]
+        if sum(1 for _name, v in values if v is not None) < 2:
+            continue
+        label = _RANK_LABELS.get(weight_key, weight_key)
+        parts = ", ".join(f"{name}={v:.1f}" if v is not None else f"{name}=?" for name, v in values)
+        lines.append(f"{label} (weight {weight}): {parts}")
+    if not lines:
+        return ""
+    return "Ranked ahead of tied files by:\n" + "\n".join(lines)
+
+
 _FILE_ROLE = QtCore.Qt.ItemDataRole.UserRole
 
 
@@ -551,6 +785,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         self,
         ffmpeg_path: str | None,
         thresholds: analysis.Thresholds,
+        rank_weights: dict[str, int],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -559,6 +794,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         self.resize(620, 380)
         self._ffmpeg_path = ffmpeg_path
         self._thresholds = thresholds
+        self._rank_weights = rank_weights
         # (label, files) per group, in display order — kept around so a scan
         # triggered from this panel can redraw in place without the caller
         # re-deriving track groupings or the user closing/reopening it.
@@ -653,7 +889,13 @@ class CompareResultsPanel(QtWidgets.QDialog):
 
         ranks = {file: _tier_rank(file) for file in group}
         best_rank = max(ranks.values())
-        tie = len({r for r in ranks.values()}) == 1
+        top_files = [f for f in group if ranks[f] == best_rank]
+        if len(group) < 2:
+            winner = None
+        elif len(top_files) == 1:
+            winner = top_files[0]
+        else:
+            winner = _composite_winner(top_files, self._rank_weights)
 
         for file in group:
             tier = file.metadata['~health_tier']
@@ -664,11 +906,15 @@ class CompareResultsPanel(QtWidgets.QDialog):
             issues = "; ".join(issue_parts) or "—"
             item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, issues])
             item.setData(0, _FILE_ROLE, file)
-            if not tie and ranks[file] == best_rank:
+            if file is winner:
                 bold = item.font(0)
                 bold.setBold(True)
                 item.setFont(0, bold)
                 item.setFont(1, bold)
+                if len(top_files) > 1:
+                    explanation = _rank_explanation(top_files, self._rank_weights)
+                    if explanation:
+                        item.setToolTip(1, explanation)
             header.addChild(item)
         header.setExpanded(True)
 
@@ -854,7 +1100,11 @@ def _track_label(track: Track) -> str:
 
 
 def _open_compare_panel(
-    files: list[File], parent: QtWidgets.QWidget, ffmpeg_path: str | None, thresholds: analysis.Thresholds
+    files: list[File],
+    parent: QtWidgets.QWidget,
+    ffmpeg_path: str | None,
+    thresholds: analysis.Thresholds,
+    rank_weights: dict[str, int],
 ) -> CompareResultsPanel | None:
     """Groups by Track (Picard's own matching decision, not our own tag
     comparison), opens the panel if there's anything to compare.
@@ -862,7 +1112,7 @@ def _open_compare_panel(
     groups = {track: group for track, group in _group_by_track(files).items() if len(group) > 1}
     if not groups:
         return None
-    panel = CompareResultsPanel(ffmpeg_path, thresholds, parent)
+    panel = CompareResultsPanel(ffmpeg_path, thresholds, rank_weights, parent)
     for track, group in groups.items():
         panel.add_group(_track_label(track), group)
     panel.show()
@@ -880,12 +1130,15 @@ class CompareHealthAction(BaseAction):
     disagrees with what the main window already shows grouped together.
 
     Doesn't declare a hard winner in the results — only bolds whichever
-    file scored higher within its group, as a subtle cue, leaving the
-    actual decision to the user. Matches the design decided earlier: a
-    perceptual-distance metric like ViSQOL/Zimtohrli would tell you the
-    files differ, but not which one is better; the directional gate-field
-    reasons (real, from analysis.analyze_file, stored in ~health_flags)
-    are what actually inform that judgment.
+    file scored higher within its group (by tier, then a user-weighted
+    rank-sum across bandwidth/noise-floor/dynamic-range/stereo-coherence
+    for tier-tied files — see _composite_winner), as a subtle cue,
+    leaving the actual decision to the user. Matches the design decided
+    earlier: a perceptual-distance metric like ViSQOL/Zimtohrli would
+    tell you the files differ, but not which one is better; the
+    directional gate-field reasons and continuous fidelity axes (real,
+    from analysis.analyze_file, stored in ~health_flags and the
+    ~health_* metric fields) are what actually inform that judgment.
     """
 
     TITLE = "Compare File Health…"
@@ -895,7 +1148,8 @@ class CompareHealthAction(BaseAction):
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
-        panel = _open_compare_panel(files, window, ffmpeg_path, thresholds)
+        rank_weights = _rank_weights_from_config(self.api.plugin_config)
+        panel = _open_compare_panel(files, window, ffmpeg_path, thresholds, rank_weights)
         if panel is None:
             window.set_statusbar_message(
                 "None of the selected files are matched to the same track.",
@@ -917,7 +1171,8 @@ class CompareAllHealthAction(BaseAction):
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
-        panel = _open_compare_panel(_all_loaded_files(), window, ffmpeg_path, thresholds)
+        rank_weights = _rank_weights_from_config(self.api.plugin_config)
+        panel = _open_compare_panel(_all_loaded_files(), window, ffmpeg_path, thresholds, rank_weights)
         if panel is None:
             window.set_statusbar_message(
                 "No tracks in the library currently have more than one matched file.",
@@ -1138,6 +1393,10 @@ def enable(api: PluginApi) -> None:
     api.plugin_config.register_option('true_peak_dbtp', analysis.TRUE_PEAK_THRESHOLD_DBTP)
     api.plugin_config.register_option('spectral_silence_db', analysis.SPECTRAL_SILENCE_THRESHOLD_DB)
     api.plugin_config.register_option('phase_angle_deg', analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG)
+    api.plugin_config.register_option('rank_weight_bandwidth', 5)
+    api.plugin_config.register_option('rank_weight_noise_floor', 5)
+    api.plugin_config.register_option('rank_weight_dr14', 5)
+    api.plugin_config.register_option('rank_weight_coherence', 5)
     api.register_file_post_load_processor(_maybe_auto_scan)
     api.register_options_page(HealthOptionsPage)
 
