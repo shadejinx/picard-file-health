@@ -248,13 +248,30 @@ class CompareResultsPanel(QtWidgets.QDialog):
     own group as a subtle cue. The user decides; we show the data.
     """
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, ffmpeg_path: str | None, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("File Health Comparison (Demo)")
         self.setModal(False)
         self.resize(620, 380)
+        self._ffmpeg_path = ffmpeg_path
+        # (label, files) per group, in display order — kept around so a scan
+        # triggered from this panel can redraw in place without the caller
+        # re-deriving track groupings or the user closing/reopening it.
+        self._groups: list[tuple[str, list[File]]] = []
 
         layout = QtWidgets.QVBoxLayout(self)
+
+        scan_row = QtWidgets.QHBoxLayout()
+        self.scan_unscanned_button = QtWidgets.QPushButton("Scan Unscanned", self)
+        self.scan_unscanned_button.setToolTip("Scan every file below that hasn't been scanned yet.")
+        self.scan_unscanned_button.clicked.connect(self._scan_unscanned)
+        self.rescan_all_button = QtWidgets.QPushButton("Rescan All", self)
+        self.rescan_all_button.setToolTip("Re-scan every file below, including already-scanned ones.")
+        self.rescan_all_button.clicked.connect(self._rescan_all)
+        scan_row.addWidget(self.scan_unscanned_button)
+        scan_row.addWidget(self.rescan_all_button)
+        scan_row.addStretch(1)
+        layout.addLayout(scan_row)
 
         self.tree = QtWidgets.QTreeWidget(self)
         self.tree.setHeaderLabels(["File", "Health", "Issues"])
@@ -283,8 +300,27 @@ class CompareResultsPanel(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
         self._update_button_states()
+        self._update_scan_button_states()
 
     def add_group(self, key: str, group: list[File]) -> None:
+        self._groups.append((key, group))
+        self._render_group(key, group)
+        self._update_scan_button_states()
+
+    def refresh(self) -> None:
+        """Redraws every group from current file metadata — called after a
+        scan triggered from this panel's own buttons finishes, so results
+        land in place instead of requiring the user to close and reopen.
+        """
+        selected = self._current_file()
+        self.tree.clear()
+        for key, group in self._groups:
+            self._render_group(key, group)
+        if selected is not None:
+            self._select_file(selected)
+        self._update_scan_button_states()
+
+    def _render_group(self, key: str, group: list[File]) -> None:
         header = QtWidgets.QTreeWidgetItem([key])
         header.setFirstColumnSpanned(True)
         italic = header.font(0)
@@ -323,6 +359,51 @@ class CompareResultsPanel(QtWidgets.QDialog):
             header.addChild(item)
         header.setExpanded(True)
 
+    def _select_file(self, file: File) -> None:
+        for i in range(self.tree.topLevelItemCount()):
+            header = self.tree.topLevelItem(i)
+            for j in range(header.childCount()):
+                child = header.child(j)
+                if child.data(0, _FILE_ROLE) is file:
+                    self.tree.setCurrentItem(child)
+                    return
+
+    def _all_files(self) -> list[File]:
+        return [file for _, group in self._groups for file in group]
+
+    def _run_scan(self, files: list[File]) -> None:
+        if not files:
+            return
+        tagger_instance().window.set_statusbar_message(
+            "Scanning file health for %(count)d file(s)…",
+            {'count': len(files)},
+            echo=None,
+        )
+        ffmpeg_path = self._ffmpeg_path
+        for file in files:
+            file.set_pending()
+            run_task(
+                lambda f=file, p=ffmpeg_path: _scan_one(f.filename, p),
+                lambda result=None, error=None, f=file: self._on_scan_finished(f, result, error),
+            )
+
+    def _on_scan_finished(self, file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
+        _scan_finished(file, result, error)
+        self.refresh()
+
+    def _scan_unscanned(self) -> None:
+        self._run_scan([f for f in self._all_files() if not f.metadata['~health_tier']])
+
+    def _rescan_all(self) -> None:
+        self._run_scan(self._all_files())
+
+    def _update_scan_button_states(self) -> None:
+        files = self._all_files()
+        self.rescan_all_button.setEnabled(bool(files))
+        self.scan_unscanned_button.setEnabled(
+            any(not f.metadata['~health_tier'] for f in files)
+        )
+
     def _current_file(self) -> File | None:
         items = self.tree.selectedItems()
         if not items:
@@ -336,6 +417,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         self.trash_button.setEnabled(has_file)
 
     def _remove_row_for(self, file: File) -> None:
+        self._groups = [(key, [f for f in group if f is not file]) for key, group in self._groups]
         for i in range(self.tree.topLevelItemCount()):
             header = self.tree.topLevelItem(i)
             for j in range(header.childCount()):
@@ -408,14 +490,16 @@ def _track_label(track: Track) -> str:
     return f"{artist} – {title}" if artist else title
 
 
-def _open_compare_panel(files: list[File], parent: QtWidgets.QWidget) -> CompareResultsPanel | None:
+def _open_compare_panel(
+    files: list[File], parent: QtWidgets.QWidget, ffmpeg_path: str | None
+) -> CompareResultsPanel | None:
     """Groups by Track (Picard's own matching decision, not our own tag
     comparison), opens the panel if there's anything to compare.
     """
     groups = {track: group for track, group in _group_by_track(files).items() if len(group) > 1}
     if not groups:
         return None
-    panel = CompareResultsPanel(parent)
+    panel = CompareResultsPanel(ffmpeg_path, parent)
     for track, group in groups.items():
         panel.add_group(_track_label(track), group)
     panel.show()
@@ -446,7 +530,8 @@ class CompareHealthAction(BaseAction):
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
         window = tagger_instance().window
-        panel = _open_compare_panel(files, window)
+        ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
+        panel = _open_compare_panel(files, window, ffmpeg_path)
         if panel is None:
             window.set_statusbar_message(
                 "None of the selected files are matched to the same track.",
@@ -466,7 +551,8 @@ class CompareAllHealthAction(BaseAction):
 
     def callback(self, objs) -> None:
         window = tagger_instance().window
-        panel = _open_compare_panel(_all_loaded_files(), window)
+        ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
+        panel = _open_compare_panel(_all_loaded_files(), window, ffmpeg_path)
         if panel is None:
             window.set_statusbar_message(
                 "No tracks in the library currently have more than one matched file.",
