@@ -141,14 +141,21 @@ class _WeightSlider(QtWidgets.QFrame):
     """A plain 0-10 importance slider for one axis of the compare
     panel's weighted tie-break (_composite_winner in this module).
 
-    Simpler than _SensitivitySlider — no per-step hints needed, since
-    "how important is this axis to you" doesn't carry the same
-    gate-specific meaning per position that a detection threshold does.
-    0 means the axis is ignored entirely.
+    `bands` is an ascending list of (min_value, hint) pairs — the
+    slider shows whichever band's threshold the current value has
+    reached or passed, live as it moves. Coarser than
+    _SensitivitySlider's one-hint-per-step (11 distinct positions here
+    don't each carry a meaningfully distinct story the way a gate
+    threshold's calibrated steps do), but still says in plain language
+    what a given weight actually does to the ranking rather than
+    leaving the user to guess what "7/10" means.
     """
 
-    def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self, title: str, bands: tuple[tuple[int, str], ...], parent: QtWidgets.QWidget | None = None
+    ) -> None:
         super().__init__(parent)
+        self._bands = bands
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setSpacing(2)
@@ -175,10 +182,23 @@ class _WeightSlider(QtWidgets.QFrame):
         self.slider.valueChanged.connect(self._on_changed)
         layout.addWidget(self.slider)
 
+        self.hint_label = QtWidgets.QLabel(self)
+        self.hint_label.setWordWrap(True)
+        muted = self.hint_label.font()
+        muted.setPointSize(max(muted.pointSize() - 1, 8))
+        self.hint_label.setFont(muted)
+        self.hint_label.setStyleSheet("color: palette(mid);")
+        layout.addWidget(self.hint_label)
+
         self.set_value(5)
 
     def _on_changed(self, value: int) -> None:
         self.value_label.setText("Ignored" if value == 0 else f"{value}/10")
+        hint = ""
+        for threshold, text in self._bands:
+            if value >= threshold:
+                hint = text
+        self.hint_label.setText(hint)
 
     def value(self) -> int:
         return self.slider.value()
@@ -248,6 +268,28 @@ _PHASE_STEPS: list[tuple[float, str]] = [
     (95.0, "Nearly any decorrelated stereo signal will trigger this."),
 ]
 _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
+
+
+# Comparison Priority weight-slider hints — banded (not one hint per
+# integer step) since "how important is this" doesn't have 11 distinct
+# stories the way a calibrated gate threshold does, but each band still
+# says in plain language what that weight actually does to the ranking.
+_RANK_BAND_TEMPLATE = (
+    (0, "Ignored — {noun} won't affect which copy wins a tie."),
+    (1, "Slight factor — only tips a tie when everything else is dead even."),
+    (4, "Meaningful factor — {comparative} has a real edge."),
+    (7, "Dominant factor — {comparative} usually wins outright."),
+)
+
+
+def _rank_bands(noun: str, comparative: str) -> tuple[tuple[int, str], ...]:
+    return tuple((threshold, text.format(noun=noun, comparative=comparative)) for threshold, text in _RANK_BAND_TEMPLATE)
+
+
+_BANDWIDTH_WEIGHT_BANDS = _rank_bands("bandwidth", "the file with more real high-frequency content")
+_NOISE_FLOOR_WEIGHT_BANDS = _rank_bands("noise floor", "the quieter (cleaner) file")
+_DR14_WEIGHT_BANDS = _rank_bands("dynamic range", "the less-compressed (more dynamic) file")
+_COHERENCE_WEIGHT_BANDS = _rank_bands("stereo coherence", "the file with a more consistent stereo image")
 
 
 def _section_header(title: str) -> QtWidgets.QLabel:
@@ -492,19 +534,19 @@ class HealthOptionsPage(OptionsPage):
         priority_intro.setWordWrap(True)
         priority_layout.addWidget(priority_intro)
 
-        self.rank_bandwidth_slider = _WeightSlider("Bandwidth", parent=self)
+        self.rank_bandwidth_slider = _WeightSlider("Bandwidth", _BANDWIDTH_WEIGHT_BANDS, parent=self)
         priority_layout.addWidget(self.rank_bandwidth_slider)
         priority_layout.addSpacing(8)
 
-        self.rank_noise_floor_slider = _WeightSlider("Noise Floor", parent=self)
+        self.rank_noise_floor_slider = _WeightSlider("Noise Floor", _NOISE_FLOOR_WEIGHT_BANDS, parent=self)
         priority_layout.addWidget(self.rank_noise_floor_slider)
         priority_layout.addSpacing(8)
 
-        self.rank_dr14_slider = _WeightSlider("Dynamic Range", parent=self)
+        self.rank_dr14_slider = _WeightSlider("Dynamic Range", _DR14_WEIGHT_BANDS, parent=self)
         priority_layout.addWidget(self.rank_dr14_slider)
         priority_layout.addSpacing(8)
 
-        self.rank_coherence_slider = _WeightSlider("Stereo Coherence", parent=self)
+        self.rank_coherence_slider = _WeightSlider("Stereo Coherence", _COHERENCE_WEIGHT_BANDS, parent=self)
         priority_layout.addWidget(self.rank_coherence_slider)
 
         priority_reset_row = QtWidgets.QHBoxLayout()
@@ -770,7 +812,11 @@ class SpectrogramDialog(QtWidgets.QDialog):
         scroll.setWidgetResizable(False)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(scroll)
-        self.resize(min(pixmap.width() + 40, 1000), min(pixmap.height() + 60, 700))
+        # analysis.SPECTROGRAM_WIDTH/HEIGHT are sized so the actual
+        # rendered PNG (requested size plus showspectrumpic's own fixed
+        # axis/legend chrome) fits well under this ceiling — the clamp
+        # is a safety net for unusual aspect ratios, not the normal path.
+        self.resize(min(pixmap.width() + 40, 1100), min(pixmap.height() + 60, 800))
 
 
 class CompareResultsPanel(QtWidgets.QDialog):
