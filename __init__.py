@@ -106,12 +106,13 @@ class HealthOptionsPage(OptionsPage):
     def __init__(self) -> None:
         super().__init__()
         layout = QtWidgets.QVBoxLayout(self)
-        self.auto_scan_checkbox = QtWidgets.QCheckBox(
-            "Automatically scan newly added files (runs the same "
-            "background-threaded scan as the manual action)",
-            self,
-        )
+        self.auto_scan_checkbox = QtWidgets.QCheckBox("Automatically scan newly added files", self)
         layout.addWidget(self.auto_scan_checkbox)
+        auto_scan_detail = QtWidgets.QLabel(
+            "Runs the same background-threaded scan as the manual action.", self
+        )
+        auto_scan_detail.setWordWrap(True)
+        layout.addWidget(auto_scan_detail)
 
         ffmpeg_group = QtWidgets.QGroupBox("ffmpeg location", self)
         ffmpeg_layout = QtWidgets.QVBoxLayout(ffmpeg_group)
