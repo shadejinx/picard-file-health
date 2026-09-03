@@ -49,17 +49,14 @@ from . import analysis
 TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
 
 
-def _scan_one(filename: str) -> dict[str, object]:
+def _scan_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
     """Runs on a background thread — real decode + measurement work via
     ffmpeg (see analysis.py), not simulated.
     """
     try:
-        result = analysis.analyze_file(filename)
-    except analysis.FfmpegNotFoundError:
-        # TODO: surface this via the Options page (path setting + guided
-        # find/download flow), instead of just failing silently. Noted,
-        # not yet built.
-        return {'error': 'ffmpeg not found'}
+        result = analysis.analyze_file(filename, ffmpeg_path=ffmpeg_path)
+    except analysis.FfmpegNotFoundError as exc:
+        return {'error': str(exc)}
     return {
         'tier': result.tier,
         'flags': "; ".join(result.issues),
@@ -69,13 +66,20 @@ def _scan_one(filename: str) -> dict[str, object]:
 
 def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
     """Runs back on the main thread once _scan_one completes."""
-    if result and not error and 'tier' in result:
-        previous_hash = file.metadata['~health_content_hash']
-        changed = bool(previous_hash) and previous_hash != result['content_hash']
-        file.metadata['~health_tier'] = result['tier']
-        file.metadata['~health_flags'] = result['flags']
-        file.metadata['~health_content_hash'] = result['content_hash']
-        file.metadata['~health_changed_since_scan'] = '1' if changed else ''
+    if result and not error:
+        if 'error' in result:
+            tagger_instance().window.set_statusbar_message(
+                "File Health: %(error)s (configure ffmpeg in Options → Plugins → File Health)",
+                {'error': result['error']},
+                echo=None,
+            )
+        elif 'tier' in result:
+            previous_hash = file.metadata['~health_content_hash']
+            changed = bool(previous_hash) and previous_hash != result['content_hash']
+            file.metadata['~health_tier'] = result['tier']
+            file.metadata['~health_flags'] = result['flags']
+            file.metadata['~health_content_hash'] = result['content_hash']
+            file.metadata['~health_changed_since_scan'] = '1' if changed else ''
     file.clear_pending()
     file.update()
 
@@ -87,8 +91,9 @@ def _maybe_auto_scan(api: PluginApi, file: File) -> None:
     if not api.plugin_config['auto_scan']:
         return
     file.set_pending()
+    ffmpeg_path = api.plugin_config['ffmpeg_path'] or None
     run_task(
-        lambda f=file: _scan_one(f.filename),
+        lambda f=file, p=ffmpeg_path: _scan_one(f.filename, p),
         lambda result=None, error=None, f=file: _scan_finished(f, result, error),
     )
 
@@ -107,13 +112,69 @@ class HealthOptionsPage(OptionsPage):
             self,
         )
         layout.addWidget(self.auto_scan_checkbox)
+
+        ffmpeg_group = QtWidgets.QGroupBox("ffmpeg location", self)
+        ffmpeg_layout = QtWidgets.QVBoxLayout(ffmpeg_group)
+
+        path_row = QtWidgets.QHBoxLayout()
+        self.ffmpeg_path_edit = QtWidgets.QLineEdit(self)
+        self.ffmpeg_path_edit.setPlaceholderText("Leave blank to search PATH automatically")
+        self.ffmpeg_path_edit.textChanged.connect(self._refresh_ffmpeg_status)
+        browse_button = QtWidgets.QPushButton("Browse…", self)
+        browse_button.clicked.connect(self._browse_ffmpeg)
+        path_row.addWidget(self.ffmpeg_path_edit)
+        path_row.addWidget(browse_button)
+        ffmpeg_layout.addLayout(path_row)
+
+        button_row = QtWidgets.QHBoxLayout()
+        detect_button = QtWidgets.QPushButton("Detect Automatically", self)
+        detect_button.clicked.connect(self._detect_ffmpeg)
+        download_button = QtWidgets.QPushButton("Get ffmpeg…", self)
+        download_button.clicked.connect(self._open_ffmpeg_download_page)
+        button_row.addWidget(detect_button)
+        button_row.addWidget(download_button)
+        button_row.addStretch(1)
+        ffmpeg_layout.addLayout(button_row)
+
+        self.ffmpeg_status_label = QtWidgets.QLabel(self)
+        self.ffmpeg_status_label.setWordWrap(True)
+        ffmpeg_layout.addWidget(self.ffmpeg_status_label)
+
+        layout.addWidget(ffmpeg_group)
         layout.addStretch(1)
 
     def load(self) -> None:
         self.auto_scan_checkbox.setChecked(self.api.plugin_config['auto_scan'])
+        self.ffmpeg_path_edit.setText(self.api.plugin_config['ffmpeg_path'])
+        self._refresh_ffmpeg_status()
 
     def save(self) -> None:
         self.api.plugin_config['auto_scan'] = self.auto_scan_checkbox.isChecked()
+        self.api.plugin_config['ffmpeg_path'] = self.ffmpeg_path_edit.text().strip()
+
+    def _browse_ffmpeg(self) -> None:
+        path, _filter = QtWidgets.QFileDialog.getOpenFileName(self, "Locate ffmpeg")
+        if path:
+            self.ffmpeg_path_edit.setText(path)
+
+    def _detect_ffmpeg(self) -> None:
+        try:
+            found = analysis.find_ffmpeg(None)  # PATH-only lookup, ignoring current text
+        except analysis.FfmpegNotFoundError:
+            self.ffmpeg_status_label.setText("Not found on PATH. Try Browse… or Get ffmpeg…")
+            return
+        self.ffmpeg_path_edit.setText(found)
+
+    def _open_ffmpeg_download_page(self) -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://ffmpeg.org/download.html"))
+
+    def _refresh_ffmpeg_status(self) -> None:
+        path = self.ffmpeg_path_edit.text().strip() or None
+        try:
+            resolved = analysis.find_ffmpeg(path)
+            self.ffmpeg_status_label.setText(f"Found: {resolved}")
+        except analysis.FfmpegNotFoundError as exc:
+            self.ffmpeg_status_label.setText(str(exc))
 
 
 class ScanHealthAction(BaseAction):
@@ -138,10 +199,11 @@ class ScanHealthAction(BaseAction):
             {'count': len(files)},
             echo=None,
         )
+        ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         for file in files:
             file.set_pending()
             run_task(
-                lambda f=file: _scan_one(f.filename),
+                lambda f=file, p=ffmpeg_path: _scan_one(f.filename, p),
                 lambda result=None, error=None, f=file: _scan_finished(f, result, error),
             )
 
@@ -602,6 +664,7 @@ def enable(api: PluginApi) -> None:
         title="Health changed since scan",
     )
     api.plugin_config.register_option('auto_scan', False)
+    api.plugin_config.register_option('ffmpeg_path', '')
     api.register_file_post_load_processor(_maybe_auto_scan)
     api.register_options_page(HealthOptionsPage)
 
