@@ -1022,9 +1022,13 @@ def _measure_dr14(ffmpeg: str, filename: str, sample_rate: int | None) -> int | 
 
 
 # Spectrogram image size — matches the compare panel's own dialog sizing;
-# see __init__.py's SpectrogramDialog.
-SPECTROGRAM_WIDTH = 900
-SPECTROGRAM_HEIGHT = 400
+# see __init__.py's SpectrogramDialog. showspectrumpic adds fixed chrome
+# around the requested size for axis labels/legend/colorbar (confirmed
+# empirically: ~282px width, ~128px height, regardless of the requested
+# size) — sized so the actual rendered PNG (this size plus that chrome)
+# fits inside SpectrogramDialog's window without a scrollbar.
+SPECTROGRAM_WIDTH = 550
+SPECTROGRAM_HEIGHT = 350
 
 
 def generate_spectrogram(
@@ -1057,6 +1061,17 @@ def generate_spectrogram(
     ]
     proc = _run_subprocess(args)
     return proc.returncode == 0 and os.path.exists(output_path)
+
+
+def _tunable(slider_name: str) -> str:
+    """Appended to a gate issue's message so a plain-language reason
+    always points at the exact Options-page control that governs it —
+    never a defect reported with no way to know it's adjustable at all.
+    Plain text, not markup: this string ends up both in the compare
+    panel's tooltip and in the `_health_flags` script variable, so it
+    has to read fine in either.
+    """
+    return f' (Adjust in Options \u2192 File Health: "{slider_name}" slider)'
 
 
 @dataclass
@@ -1149,7 +1164,7 @@ def analyze_file(
 
     has_clipping = flat_factor > thresholds.clip_flat_factor
     if has_clipping:
-        issues.append("Clipping detected")
+        issues.append(f"Sound is clipped — pushed past full volume and distorted{_tunable('Clipping')}")
 
     has_true_peak_overs = true_peak is not None and true_peak >= thresholds.true_peak_dbtp
     if has_true_peak_overs and not has_clipping:
@@ -1157,7 +1172,10 @@ def analyze_file(
         # defect — both signals pointing at "this file clips" is redundant
         # to say twice, but true-peak-only is a genuinely distinct finding
         # (inter-sample overshoot with no sample actually at full scale).
-        issues.append(f"Inter-sample peaks exceed full scale (True Peak {true_peak:+.1f}dBTP)")
+        issues.append(
+            f"Volume peaks go past full scale between samples (True Peak {true_peak:+.1f}dBTP) "
+            f"— can distort on some playback equipment{_tunable('True Peak')}"
+        )
 
     has_signal = peak_db is not None and peak_db > MIN_PEAK_DB_FOR_SPECTRAL_CHECK
     has_cutoff = (
@@ -1176,15 +1194,15 @@ def analyze_file(
             # cannot explain the measured silence up there. The source
             # feeding this encode was already missing that content.
             issues.append(
-                f"Confirmed transcode: LAME's own settings allowed content up to "
-                f"{lame_lowpass_hz / 1000:.1f}kHz through unfiltered, but none exists "
-                f"above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz — the source was "
-                "already lossy before this encode"
+                f"Confirmed lossy source: the encoder's own settings would have let sound up "
+                f"to {lame_lowpass_hz / 1000:.1f}kHz through, but there's none above "
+                f"{SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz — this was compressed from an "
+                f"already lossy source before reaching this file{_tunable('Missing Treble')}"
             )
         else:
             issues.append(
-                f"No real content above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz "
-                "(likely transcoded from a lossy source)"
+                f"Missing all sound above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz — likely "
+                f"converted from a lossy file (like an MP3) at some point{_tunable('Missing Treble')}"
             )
 
     above_hires_cutoff_db: float | None = None
@@ -1203,9 +1221,9 @@ def analyze_file(
             # ordinary-rate source, not actually recorded/mastered at its
             # declared rate.
             issues.append(
-                f"No real content above {FAKE_HIRES_CHECK_FREQUENCY_HZ / 1000:.0f}kHz despite a "
-                f"{stream_info.sample_rate}Hz sample rate — likely upsampled from an "
-                "ordinary-resolution source, not genuine hi-res audio"
+                f"Labeled as {stream_info.sample_rate}Hz hi-res audio, but has no real sound "
+                f"above {FAKE_HIRES_CHECK_FREQUENCY_HZ / 1000:.0f}kHz — likely stretched up "
+                f"from an ordinary file rather than genuine hi-res{_tunable('Missing Treble')}"
             )
 
     # Phase/channel-identity checks need two channels to compare —
@@ -1220,7 +1238,10 @@ def analyze_file(
             # A real, audible defect — will cancel out when summed to mono
             # (many phone/laptop/car speakers do this) — a genuine gate
             # issue, not just informational.
-            issues.append("Channels are out of phase (cancels out when played back in mono)")
+            issues.append(
+                f"Left and right channels cancel out — will sound hollow or vanish entirely on "
+                f"mono speakers{_tunable('Out-of-Phase Channels')}"
+            )
         if is_mono_duplicated:
             # Not a quality defect — a mono source duplicated into both
             # channels loses nothing, it's just wasteful. Informational,
