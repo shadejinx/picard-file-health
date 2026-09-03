@@ -473,7 +473,7 @@ def _run_merged_analysis(
     include_hires_check: bool,
     phase_angle_deg: float,
     sample_rate: int | None,
-) -> tuple[str, int]:
+) -> tuple[str, str, int]:
     """One ffmpeg invocation, one decode, for every whole-file measurement
     that doesn't need another measurement's result first: clipping/peak
     stats (astats), spectral-cutoff/transcode detection (highpass +
@@ -511,10 +511,16 @@ def _run_merged_analysis(
     below Nyquist keeps the topmost probe out of a resampler's own
     transition band.
 
-    Returns (stderr, returncode) for the whole invocation — a non-zero
-    returncode means ffmpeg couldn't decode the file at all (every
-    branch depends on the same decode succeeding), same meaning the
-    first astats-only pass's returncode used to carry.
+    Returns (stdout, stderr, returncode) for the whole invocation — a
+    non-zero returncode means ffmpeg couldn't decode the file at all
+    (every branch depends on the same decode succeeding), same meaning
+    the first astats-only pass's returncode used to carry. stdout only
+    ever carries the phase-check branch's per-frame
+    `lavfi.aphasemeter.phase` metadata (via `ametadata=print:file=-`,
+    routed there specifically so it never collides with any other
+    branch's stderr output — confirmed empirically clean against the
+    full multi-branch graph, not just the aphasemeter branch alone);
+    empty when the phase branch isn't included.
     """
     branches: list[tuple[str | None, str]] = [
         ('main', 'astats@main'),
@@ -522,7 +528,9 @@ def _run_merged_analysis(
         (None, 'loudnorm=print_format=json'),
     ]
     if include_phase_check:
-        branches.append((None, f'aphasemeter=video=0:phasing=1:angle={phase_angle_deg}'))
+        branches.append(
+            (None, f'aphasemeter=video=0:phasing=1:angle={phase_angle_deg},ametadata=print:file=-')
+        )
     if include_hires_check:
         branches.append(('hires', f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect@hires'))
     if sample_rate:
@@ -543,7 +551,7 @@ def _run_merged_analysis(
     for out_label in out_labels:
         args += ['-map', f'[{out_label}]', '-f', 'null', '-']
     proc = _run_subprocess(args)
-    return proc.stderr, proc.returncode
+    return proc.stdout, proc.stderr, proc.returncode
 
 
 def _parse_astats(stderr: str) -> tuple[float, float | None]:
@@ -594,6 +602,28 @@ def _measure_bandwidth(merged_stderr: str, sample_rate: int | None, peak_db: flo
         if mean_volume is not None and mean_volume > threshold:
             highest = float(freq)
     return highest
+
+
+_PHASE_METADATA_RE = re.compile(r'lavfi\.aphasemeter\.phase=(-?[\d.]+)')
+
+
+def _measure_stereo_coherence(merged_stdout: str) -> float | None:
+    """Mean of aphasemeter's own per-frame phase-correlation value
+    (`lavfi.aphasemeter.phase`, range [-1, 1]: 1 = perfectly in phase,
+    -1 = fully inverted) across the whole track — a continuous,
+    cause-agnostic stereo-coherence estimate for the compare panel's
+    ranking, distinct from the binary out-of-phase gate above (which
+    only fires on a sustained near-total inversion). A deliberately
+    mixed stereo master tends to hold a high, stable positive mean; bad
+    down/up-mixing, heavy decorrelation, or certain transcoding
+    artifacts pull it down — without needing to know which. None when
+    the phase branch wasn't run (mono source, or the value couldn't be
+    parsed at all) rather than a misleading 0.0.
+    """
+    values = [float(m.group(1)) for m in _PHASE_METADATA_RE.finditer(merged_stdout)]
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _parse_loudnorm(stderr: str) -> tuple[float | None, float | None]:
@@ -955,6 +985,7 @@ class AnalysisResult:
     dr14: int | None
     spectral_bandwidth_hz: float | None
     noise_floor_db: float | None
+    stereo_coherence: float | None
 
 
 def analyze_file(
@@ -988,7 +1019,7 @@ def analyze_file(
     channels = stream_info.channels or 0
     is_hires = stream_info.sample_rate is not None and stream_info.sample_rate > FAKE_HIRES_MIN_SAMPLE_RATE_HZ
 
-    merged_stderr, merged_returncode = _run_merged_analysis(
+    merged_stdout, merged_stderr, merged_returncode = _run_merged_analysis(
         ffmpeg,
         filename,
         include_phase_check=channels >= 2,
@@ -1087,8 +1118,10 @@ def analyze_file(
     # meaningless (and aphasemeter would just misbehave) on mono source
     # material, which is exactly why the branch was left out of the
     # merged graph entirely for those files rather than run and ignored.
+    stereo_coherence: float | None = None
     if channels >= 2:
         is_mono_duplicated, is_out_of_phase = _parse_phasemeter(merged_stderr)
+        stereo_coherence = _measure_stereo_coherence(merged_stdout)
         if is_out_of_phase:
             # A real, audible defect — will cancel out when summed to mono
             # (many phone/laptop/car speakers do this) — a genuine gate
@@ -1150,4 +1183,5 @@ def analyze_file(
         dr14=dr14,
         spectral_bandwidth_hz=spectral_bandwidth_hz,
         noise_floor_db=noise_floor_db,
+        stereo_coherence=stereo_coherence,
     )
