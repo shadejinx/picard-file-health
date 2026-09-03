@@ -7,19 +7,20 @@ clipping (astats Flat factor, calibrated threshold), True Peak
 inter-sample overs, spectral-cutoff/transcode detection (confirmed, when
 the file has one, against the LAME encoder's own embedded low-pass
 setting — decisive rather than heuristic evidence of a prior lossy
-generation), and out-of-phase channels. When no gate fires, the tier
-gradient (Poor/Ok/Good/Great/Excellent) is set by a real DR14 dynamic-
-range measurement (Pleasurize Music Foundation "TT DR Meter" algorithm,
-reimplemented against ffmpeg's own astats filter and validated bit-for-
-bit against the open-source reference implementation — see the DR14_*
-constants below) — not the LUFS-bucket proxy this used before.
-Mono-duplicated-into-stereo and below-transparency-bitrate lossy
-encoding (MP3/AAC/Vorbis/Opus, HydrogenAudio/Xiph's own published
+generation), fake-hi-res detection (declared sample rate above 48kHz
+with no real spectral content above 24kHz — upsampled from an ordinary
+source, not genuine hi-res), and out-of-phase channels. When no gate
+fires, the tier gradient (Poor/Ok/Good/Great/Excellent) is set by a
+real DR14 dynamic-range measurement (Pleasurize Music Foundation "TT DR
+Meter" algorithm, reimplemented against ffmpeg's own astats filter and
+validated bit-for-bit against the open-source reference implementation
+— see the DR14_* constants below) — not the LUFS-bucket proxy this used
+before. Mono-duplicated-into-stereo and below-transparency-bitrate
+lossy encoding (MP3/AAC/Vorbis/Opus, HydrogenAudio/Xiph's own published
 consensus thresholds — see TRANSPARENT_BITRATE_KBPS) are informational
 only, never gate or affect the tier: neither is a measured defect in the
 decoded signal, just statistical likelihood from declared codec/bitrate.
-Sample-rate scoring and hum detection are documented future work, not
-implemented here yet.
+Hum detection is documented future work, not implemented here yet.
 """
 
 from __future__ import annotations
@@ -56,6 +57,22 @@ SPECTRAL_CUTOFF_FREQUENCY_HZ = 17000
 # peaked at -74dB overall and falsely tripped the cutoff gate at -91dB
 # above 17kHz before this guard was added.
 MIN_PEAK_DB_FOR_SPECTRAL_CHECK = -40.0
+
+# "Hi-res" sample rates (88.2/96/176.4/192kHz and up) claim real content
+# beyond ordinary CD/DVD-quality bandwidth. A file upsampled from an
+# ordinary-rate source has a hard wall at that source's own Nyquist
+# frequency — nothing genuinely new gets added by resampling. Checking
+# above 24kHz (safely past both 44.1kHz-family's 22.05kHz Nyquist and
+# 48kHz-family's 24kHz Nyquist, so real CD/DVD-quality masters of either
+# family aren't penalized) catches this regardless of which "ordinary"
+# rate the source was. Validated on real ffmpeg-resampled fixtures: a
+# 16kHz-lowpassed 44.1kHz source resampled to 96kHz measured -91dB
+# (silence) above 24kHz; a genuine 96kHz file with real content at
+# 30kHz measured -14dB (clearly present) at the same threshold.
+FAKE_HIRES_CHECK_FREQUENCY_HZ = 24000
+# Only applies above ordinary DVD/video-audio rate (48kHz) — 44.1/48kHz
+# files are covered by the existing 17kHz spectral-cutoff check instead.
+FAKE_HIRES_MIN_SAMPLE_RATE_HZ = 48000
 
 # Minimum astats "Flat factor" to count as real clipping, not incidental
 # same-value runs in loud content. Empirically calibrated: a clean quiet
@@ -579,6 +596,7 @@ class AnalysisResult:
     true_peak_dbtp: float | None
     clipping_flat_factor: float
     spectral_energy_above_cutoff_db: float | None
+    spectral_energy_above_hires_cutoff_db: float | None
     lame_lowpass_hz: int | None
     dr14: int | None
 
@@ -664,6 +682,26 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
                 "(likely transcoded from a lossy source)"
             )
 
+    is_hires = stream_info.sample_rate is not None and stream_info.sample_rate > FAKE_HIRES_MIN_SAMPLE_RATE_HZ
+    above_hires_cutoff_db: float | None = None
+    if is_hires and has_signal:
+        hires_stderr, _hires_returncode = _run_ffmpeg_filter(
+            ffmpeg, filename, f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect'
+        )
+        above_hires_cutoff_db = _parse_mean_volume(hires_stderr)
+        if above_hires_cutoff_db is not None and above_hires_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB:
+            # A real measured defect, not a guess: genuine content captured
+            # at this sample rate would extend past the check frequency
+            # (see FAKE_HIRES_CHECK_FREQUENCY_HZ for the validated margin);
+            # a hard wall there means the file was upsampled from an
+            # ordinary-rate source, not actually recorded/mastered at its
+            # declared rate.
+            issues.append(
+                f"No real content above {FAKE_HIRES_CHECK_FREQUENCY_HZ / 1000:.0f}kHz despite a "
+                f"{stream_info.sample_rate}Hz sample rate — likely upsampled from an "
+                "ordinary-resolution source, not genuine hi-res audio"
+            )
+
     # Phase/channel-identity checks need two channels to compare — meaningless
     # (and aphasemeter would just misbehave) on mono source material.
     if channels >= 2:
@@ -714,6 +752,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         true_peak_dbtp=true_peak,
         clipping_flat_factor=flat_factor,
         spectral_energy_above_cutoff_db=above_cutoff_db,
+        spectral_energy_above_hires_cutoff_db=above_hires_cutoff_db,
         lame_lowpass_hz=lame_lowpass_hz,
         dr14=dr14,
     )
