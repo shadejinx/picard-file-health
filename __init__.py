@@ -197,20 +197,31 @@ _PHASE_STEPS: list[tuple[float, str]] = [
 _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
 
 
-def _group_box(title: str) -> QtWidgets.QGroupBox:
-    """A QGroupBox whose title reads as a section header — larger and
-    heavier than Qt's native (small, thin) default — used for every
-    top-level section on the options page so headers are visually
-    consistent. Styles only the `::title` sub-control, not the box
-    itself, so the bump doesn't propagate to child widgets that don't
-    set their own font.
+def _section_header(title: str) -> QtWidgets.QLabel:
+    """A bold, enlarged QLabel used as a section heading above a bordered
+    content frame — direct QFont mutation, not a stylesheet, because
+    QGroupBox::title styling proved unreliable under macOS's native Qt
+    style (confirmed: it rendered no different from the native default).
+    This is the same technique _SensitivitySlider already uses
+    successfully for its own title/hint labels.
     """
-    box = QtWidgets.QGroupBox(title)
-    box.setStyleSheet(
-        "QGroupBox::title { font-weight: 600; font-size: 12pt; "
-        "subcontrol-origin: margin; left: 4px; padding: 0 4px; }"
-    )
-    return box
+    label = QtWidgets.QLabel(title)
+    font = label.font()
+    font.setBold(True)
+    font.setPointSize(font.pointSize() + 3)
+    label.setFont(font)
+    return label
+
+
+def _section_frame() -> tuple[QtWidgets.QFrame, QtWidgets.QVBoxLayout]:
+    """A bordered content frame to place under a _section_header(),
+    replacing QGroupBox entirely so the (unreliable) native title
+    rendering never enters the picture.
+    """
+    frame = QtWidgets.QFrame()
+    frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+    frame_layout = QtWidgets.QVBoxLayout(frame)
+    return frame, frame_layout
 
 
 def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
@@ -308,8 +319,8 @@ class HealthOptionsPage(OptionsPage):
         auto_scan_detail.setWordWrap(True)
         layout.addWidget(auto_scan_detail)
 
-        ffmpeg_group = _group_box("ffmpeg Location")
-        ffmpeg_layout = QtWidgets.QVBoxLayout(ffmpeg_group)
+        layout.addWidget(_section_header("ffmpeg Location"))
+        ffmpeg_group, ffmpeg_layout = _section_frame()
 
         path_row = QtWidgets.QHBoxLayout()
         self.ffmpeg_path_edit = QtWidgets.QLineEdit(self)
@@ -337,8 +348,8 @@ class HealthOptionsPage(OptionsPage):
 
         layout.addWidget(ffmpeg_group)
 
-        sensitivity_group = _group_box("Detection Sensitivity")
-        sensitivity_layout = QtWidgets.QVBoxLayout(sensitivity_group)
+        layout.addWidget(_section_header("Detection Sensitivity"))
+        sensitivity_group, sensitivity_layout = _section_frame()
         sensitivity_intro = QtWidgets.QLabel(
             "Any one check below can flag a file \"Bad\" on its own, even if it sounds fine "
             "to you. Loosen a slider if it's flagging files that sound OK; tighten it if it's "
