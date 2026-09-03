@@ -251,18 +251,42 @@ last scan" (caveat: whole-file, so tag edits also trigger it, not just audio cha
 
 ## Not yet built (explicit roadmap, in priority order as last discussed)
 
-1. Combining the separate `ffmpeg` filter passes per file (astats, spectral
-   cutoff, loudnorm, phase, fake-hi-res, DR14's own astats pass, and — since
-   this pass — hum detection's silencedetect + up to 4 scoped bandpass
-   passes) into one filtergraph (`asplit` into astats/volumedetect/loudnorm/
-   aphasemeter/DR14 branches) — pure perf optimization, not correctness.
-   `_probe_stream_info()`'s single `ffprobe` call (sample rate + codec/
-   bitrate, consolidated from what would otherwise be two separate probes)
-   is unrelated to this — ffprobe reads container metadata, not filtered
-   audio, so it's not part of the filtergraph-merge idea.
-2. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
+1. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
    that we decode audio anyway for the real checks — removes the false-positive
    "changed" flag on pure tag edits.
+
+Done this pass: the astats/spectral-cutoff/loudnorm/phase/fake-hi-res
+whole-file measurements now run as one merged ffmpeg invocation
+(`analysis._run_merged_analysis()`, `asplit` into named filter instances —
+`astats@main`, `volumedetect@cutoff`, `loudnorm`, `aphasemeter`,
+`volumedetect@hires`), replacing what used to be 3-5 separate process
+spawns/decodes per file with one. `StreamInfo` gained a `channels` field
+(one more entry on the existing single ffprobe call, no new probe) so
+whether to even include the phase-check/hires-check branches is decided
+upfront from container metadata, before any ffmpeg filter pass runs —
+necessary because feeding `aphasemeter` a genuinely mono file doesn't
+error but does print a bare `mono_start: 0` line that the existing
+value-blind `'mono_start' in stderr` parser would misread as "mono
+content duplicated into stereo", so that branch must be structurally
+absent for mono files, not just ignored after the fact (confirmed
+empirically before trusting the merge, per this repo's own standing
+discipline). Two same-type filters in one invocation (astats appears
+once; volumedetect can appear twice) print indistinguishable output
+*unless* each instance is explicitly named (`filtername@tag`) — ffmpeg
+then tags every line from that instance `[filtername@tag @ 0xADDR]`,
+which `analysis._filter_instance_output()` slices stderr on so each
+existing single-filter parser runs unmodified against just its own
+branch. DR14's own astats pass and hum detection (silencedetect + up to
+4 scoped bandpass passes) stay separate, later passes — both are
+skipped outright once `issues` is non-empty, a real perf saving folding
+them into the always-run merged graph would give up; hum detection
+additionally can't join it at all, since it needs `silencedetect`'s
+quiet-window result before it even knows where to run its scoped
+bandpass filters. Validated bit-for-bit against every existing fixture
+(same tier/issues/info/dr14/lufs/true-peak/flat-factor/cutoff/hires
+values, old code vs. new, across the full fixture catalogue above) —
+pure perf change, not correctness, confirmed rather than assumed.
+
 
 Explicitly dropped from scope (user decision, don't resurrect without re-asking):
 - A whole-library health report — Picard is a tagger operating on a working
@@ -407,13 +431,9 @@ expected, handled outcome, not a bug, throughout `analysis.py`:
 
 ## Immediate next action if resuming heuristics work
 
-Hum/mains-noise detection (item 1 of the old roadmap) is done — see the
-"Possible mains hum" entry above. Pick up at item 1 of the current "not yet
-built" list (filtergraph consolidation) — the last remaining roadmap item,
-`content_hash()` PCM isolation, is a small self-contained fix with no
-ffmpeg-filter-validation discipline needed (just decode-and-hash instead of
-read-raw-bytes-and-hash), so either order is fine; filtergraph consolidation
-is the one that actually needs care (validate the merged multi-branch
-`asplit` filtergraph produces byte-identical stats to today's separate
-passes on every existing test fixture before trusting it, not just "looks
-right").
+Hum/mains-noise detection and ffmpeg filtergraph consolidation (former
+roadmap items 1 and the top "not yet built" entry) are both done — see
+"Possible mains hum" and the "Done this pass" note above. The only
+remaining roadmap item is `content_hash()` PCM isolation — a small
+self-contained fix (decode-and-hash instead of read-raw-bytes-and-hash),
+no ffmpeg-filter-validation discipline needed.
