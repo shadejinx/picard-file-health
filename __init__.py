@@ -49,12 +49,84 @@ from . import analysis
 TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
 
 
-def _scan_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
+class _SensitivitySlider(QtWidgets.QWidget):
+    """One labeled slider bound to an integer-scaled float gate threshold.
+
+    QSlider is integer-only; `scale` converts between the slider's
+    integer steps and the underlying float value (e.g. scale=10 gives
+    0.1 precision). `fmt` renders the live value into the header label.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        description: str,
+        minimum: float,
+        maximum: float,
+        default: float,
+        scale: float,
+        fmt: str,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._scale = scale
+        self._fmt = fmt
+        self._default = default
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        header = QtWidgets.QHBoxLayout()
+        title_label = QtWidgets.QLabel(title, self)
+        bold = title_label.font()
+        bold.setBold(True)
+        title_label.setFont(bold)
+        self.value_label = QtWidgets.QLabel(self)
+        header.addWidget(title_label)
+        header.addStretch(1)
+        header.addWidget(self.value_label)
+        layout.addLayout(header)
+
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self)
+        self.slider.setMinimum(round(minimum * scale))
+        self.slider.setMaximum(round(maximum * scale))
+        self.slider.valueChanged.connect(self._on_changed)
+        layout.addWidget(self.slider)
+
+        detail = QtWidgets.QLabel(description, self)
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
+
+        self.set_value(default)
+
+    def _on_changed(self, raw: int) -> None:
+        self.value_label.setText(self._fmt.format(raw / self._scale))
+
+    def value(self) -> float:
+        return self.slider.value() / self._scale
+
+    def set_value(self, value: float) -> None:
+        self.slider.setValue(round(value * self._scale))
+
+    def reset_to_default(self) -> None:
+        self.set_value(self._default)
+
+
+def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
+    return analysis.Thresholds(
+        clip_flat_factor=plugin_config['clip_flat_factor'],
+        true_peak_dbtp=plugin_config['true_peak_dbtp'],
+        spectral_silence_db=plugin_config['spectral_silence_db'],
+        phase_angle_deg=plugin_config['phase_angle_deg'],
+    )
+
+
+def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thresholds) -> dict[str, object]:
     """Runs on a background thread — real decode + measurement work via
     ffmpeg (see analysis.py), not simulated.
     """
     try:
-        result = analysis.analyze_file(filename, ffmpeg_path=ffmpeg_path)
+        result = analysis.analyze_file(filename, ffmpeg_path=ffmpeg_path, thresholds=thresholds)
     except (analysis.FfmpegNotFoundError, analysis.AnalysisError) as exc:
         # FfmpegNotFoundError (incl. FfmpegVersionTooOldError): ffmpeg
         # itself is missing/unusable — an environment problem, fixed in
@@ -112,8 +184,9 @@ def _maybe_auto_scan(api: PluginApi, file: File) -> None:
         return
     file.set_pending()
     ffmpeg_path = api.plugin_config['ffmpeg_path'] or None
+    thresholds = _thresholds_from_config(api.plugin_config)
     run_task(
-        lambda f=file, p=ffmpeg_path: _scan_one(f.filename, p),
+        lambda f=file, p=ffmpeg_path, t=thresholds: _scan_one(f.filename, p, t),
         lambda result=None, error=None, f=file: _scan_finished(f, result, error),
     )
 
@@ -162,16 +235,90 @@ class HealthOptionsPage(OptionsPage):
         ffmpeg_layout.addWidget(self.ffmpeg_status_label)
 
         layout.addWidget(ffmpeg_group)
+
+        sensitivity_group = QtWidgets.QGroupBox("Detection Sensitivity", self)
+        sensitivity_layout = QtWidgets.QVBoxLayout(sensitivity_group)
+        sensitivity_intro = QtWidgets.QLabel(
+            "The defaults below are empirically calibrated against real defective audio, "
+            "but \"measurably over a threshold\" and \"audibly bad\" aren't always the same "
+            "thing — a single reading past a boundary forces the whole file to \"Bad\", with "
+            "no other check able to override it. Loosen a slider if a check is flagging files "
+            "that sound fine to you; tighten it if it's missing real defects.",
+            self,
+        )
+        sensitivity_intro.setWordWrap(True)
+        sensitivity_layout.addWidget(sensitivity_intro)
+
+        self.clip_slider = _SensitivitySlider(
+            "Clipping (Flat factor)",
+            "Higher = more tolerant of same-value sample runs before calling it clipping. "
+            "Calibrated range: clean audio measures ~0, real clipping starts around 16.",
+            minimum=0.1, maximum=30.0, default=analysis.MIN_FLAT_FACTOR_FOR_CLIPPING,
+            scale=10, fmt="{:.1f}", parent=self,
+        )
+        sensitivity_layout.addWidget(self.clip_slider)
+
+        self.true_peak_slider = _SensitivitySlider(
+            "True Peak (dBTP)",
+            "Higher = more tolerant of inter-sample overshoot above 0dBTP. The ITU-R "
+            "BS.1770-4 true-peak measurement method has its own documented accuracy limit "
+            "of ~0.55dB, so readings just over 0 aren't reliable evidence of real clipping.",
+            minimum=-3.0, maximum=3.0, default=analysis.TRUE_PEAK_THRESHOLD_DBTP,
+            scale=10, fmt="{:+.1f} dBTP", parent=self,
+        )
+        sensitivity_layout.addWidget(self.true_peak_slider)
+
+        self.spectral_silence_slider = _SensitivitySlider(
+            "Spectral cutoff / fake hi-res",
+            "Lower (more negative) = requires more silence above the cutoff frequency "
+            "before flagging a likely transcode or fake hi-res upsample. Shared by both "
+            "checks — they're the same technique at two different frequencies.",
+            minimum=-90.0, maximum=-30.0, default=analysis.SPECTRAL_SILENCE_THRESHOLD_DB,
+            scale=1, fmt="{:.0f} dB", parent=self,
+        )
+        sensitivity_layout.addWidget(self.spectral_silence_slider)
+
+        self.phase_angle_slider = _SensitivitySlider(
+            "Out-of-phase angle",
+            "Lower = flags milder phase deviation from perfect in-phase; 180\u00b0 is exact "
+            "inversion. ffmpeg's own default is 170\u00b0.",
+            minimum=90.0, maximum=180.0, default=analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG,
+            scale=1, fmt="{:.0f}\u00b0", parent=self,
+        )
+        sensitivity_layout.addWidget(self.phase_angle_slider)
+
+        reset_row = QtWidgets.QHBoxLayout()
+        reset_button = QtWidgets.QPushButton("Reset to Calibrated Defaults", self)
+        reset_button.clicked.connect(self._reset_sensitivity_defaults)
+        reset_row.addStretch(1)
+        reset_row.addWidget(reset_button)
+        sensitivity_layout.addLayout(reset_row)
+
+        layout.addWidget(sensitivity_group)
         layout.addStretch(1)
 
     def load(self) -> None:
         self.auto_scan_checkbox.setChecked(self.api.plugin_config['auto_scan'])
         self.ffmpeg_path_edit.setText(self.api.plugin_config['ffmpeg_path'])
         self._refresh_ffmpeg_status()
+        self.clip_slider.set_value(self.api.plugin_config['clip_flat_factor'])
+        self.true_peak_slider.set_value(self.api.plugin_config['true_peak_dbtp'])
+        self.spectral_silence_slider.set_value(self.api.plugin_config['spectral_silence_db'])
+        self.phase_angle_slider.set_value(self.api.plugin_config['phase_angle_deg'])
 
     def save(self) -> None:
         self.api.plugin_config['auto_scan'] = self.auto_scan_checkbox.isChecked()
         self.api.plugin_config['ffmpeg_path'] = self.ffmpeg_path_edit.text().strip()
+        self.api.plugin_config['clip_flat_factor'] = self.clip_slider.value()
+        self.api.plugin_config['true_peak_dbtp'] = self.true_peak_slider.value()
+        self.api.plugin_config['spectral_silence_db'] = self.spectral_silence_slider.value()
+        self.api.plugin_config['phase_angle_deg'] = self.phase_angle_slider.value()
+
+    def _reset_sensitivity_defaults(self) -> None:
+        self.clip_slider.reset_to_default()
+        self.true_peak_slider.reset_to_default()
+        self.spectral_silence_slider.reset_to_default()
+        self.phase_angle_slider.reset_to_default()
 
     def _browse_ffmpeg(self) -> None:
         path, _filter = QtWidgets.QFileDialog.getOpenFileName(self, "Locate ffmpeg")
@@ -240,10 +387,11 @@ class ScanHealthAction(BaseAction):
             echo=None,
         )
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
+        thresholds = _thresholds_from_config(self.api.plugin_config)
         for file in files:
             file.set_pending()
             run_task(
-                lambda f=file, p=ffmpeg_path: _scan_one(f.filename, p),
+                lambda f=file, p=ffmpeg_path, t=thresholds: _scan_one(f.filename, p, t),
                 lambda result=None, error=None, f=file: _scan_finished(f, result, error),
             )
 
@@ -285,12 +433,18 @@ class CompareResultsPanel(QtWidgets.QDialog):
     own group as a subtle cue. The user decides; we show the data.
     """
 
-    def __init__(self, ffmpeg_path: str | None, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        ffmpeg_path: str | None,
+        thresholds: analysis.Thresholds,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("File Health Comparison (Demo)")
         self.setModal(False)
         self.resize(620, 380)
         self._ffmpeg_path = ffmpeg_path
+        self._thresholds = thresholds
         # (label, files) per group, in display order — kept around so a scan
         # triggered from this panel can redraw in place without the caller
         # re-deriving track groupings or the user closing/reopening it.
@@ -417,10 +571,11 @@ class CompareResultsPanel(QtWidgets.QDialog):
             echo=None,
         )
         ffmpeg_path = self._ffmpeg_path
+        thresholds = self._thresholds
         for file in files:
             file.set_pending()
             run_task(
-                lambda f=file, p=ffmpeg_path: _scan_one(f.filename, p),
+                lambda f=file, p=ffmpeg_path, t=thresholds: _scan_one(f.filename, p, t),
                 lambda result=None, error=None, f=file: self._on_scan_finished(f, result, error),
             )
 
@@ -528,7 +683,7 @@ def _track_label(track: Track) -> str:
 
 
 def _open_compare_panel(
-    files: list[File], parent: QtWidgets.QWidget, ffmpeg_path: str | None
+    files: list[File], parent: QtWidgets.QWidget, ffmpeg_path: str | None, thresholds: analysis.Thresholds
 ) -> CompareResultsPanel | None:
     """Groups by Track (Picard's own matching decision, not our own tag
     comparison), opens the panel if there's anything to compare.
@@ -536,7 +691,7 @@ def _open_compare_panel(
     groups = {track: group for track, group in _group_by_track(files).items() if len(group) > 1}
     if not groups:
         return None
-    panel = CompareResultsPanel(ffmpeg_path, parent)
+    panel = CompareResultsPanel(ffmpeg_path, thresholds, parent)
     for track, group in groups.items():
         panel.add_group(_track_label(track), group)
     panel.show()
@@ -568,7 +723,8 @@ class CompareHealthAction(BaseAction):
         files = list(iter_files_from_objects(objs))
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
-        panel = _open_compare_panel(files, window, ffmpeg_path)
+        thresholds = _thresholds_from_config(self.api.plugin_config)
+        panel = _open_compare_panel(files, window, ffmpeg_path, thresholds)
         if panel is None:
             window.set_statusbar_message(
                 "None of the selected files are matched to the same track.",
@@ -589,7 +745,8 @@ class CompareAllHealthAction(BaseAction):
     def callback(self, objs) -> None:
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
-        panel = _open_compare_panel(_all_loaded_files(), window, ffmpeg_path)
+        thresholds = _thresholds_from_config(self.api.plugin_config)
+        panel = _open_compare_panel(_all_loaded_files(), window, ffmpeg_path, thresholds)
         if panel is None:
             window.set_statusbar_message(
                 "No tracks in the library currently have more than one matched file.",
@@ -806,6 +963,10 @@ def enable(api: PluginApi) -> None:
     )
     api.plugin_config.register_option('auto_scan', False)
     api.plugin_config.register_option('ffmpeg_path', '')
+    api.plugin_config.register_option('clip_flat_factor', analysis.MIN_FLAT_FACTOR_FOR_CLIPPING)
+    api.plugin_config.register_option('true_peak_dbtp', analysis.TRUE_PEAK_THRESHOLD_DBTP)
+    api.plugin_config.register_option('spectral_silence_db', analysis.SPECTRAL_SILENCE_THRESHOLD_DB)
+    api.plugin_config.register_option('phase_angle_deg', analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG)
     api.register_file_post_load_processor(_maybe_auto_scan)
     api.register_options_page(HealthOptionsPage)
 
