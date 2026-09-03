@@ -2,16 +2,18 @@
 
 Every threshold/formula here was empirically validated against real ffmpeg
 output before being written (see the plugin's development history) — not
-guessed from documentation. Two genuinely reliable gate checks are
-implemented: clipping and spectral-cutoff (transcode) detection. A third,
-LUFS-based loudness gradient, is an honest coarse proxy for "how squashed
-the master might be" referencing real industry loudness norms (streaming
-platforms target ~-14 LUFS integrated, EBU R128 broadcast targets ~-23
-LUFS, masters pushed louder than ~-8 LUFS integrated are the classic
-"loudness war" sound) — it is NOT a true DR14 dynamic-range measurement,
-which needs block-based peak-vs-RMS analysis. That, plus real bitrate-vs-
-codec-transparency scoring, sample-rate scoring, hum detection, and phase
-correlation, are documented future work, not implemented here yet.
+guessed from documentation. Gate checks implemented (force tier "Bad"):
+clipping (astats Flat factor, calibrated threshold), True Peak
+inter-sample overs, spectral-cutoff/transcode detection, and out-of-phase
+channels. A coarse LUFS-based loudness gradient (Poor/Ok/Good/Excellent)
+approximates "how squashed the master might be" against real industry
+loudness norms (streaming ~-14 LUFS integrated, EBU R128 broadcast ~-23
+LUFS, "loudness war" masters ~-8 LUFS or louder) — explicitly NOT a true
+DR14 dynamic-range measurement, which needs block-based peak-vs-RMS
+analysis. Mono-duplicated-into-stereo is informational only, not a gate
+issue. Real DR14, bitrate-vs-codec-transparency scoring, sample-rate
+scoring, hum detection, and LAME-header inspection are documented future
+work, not implemented here yet.
 """
 
 from __future__ import annotations
