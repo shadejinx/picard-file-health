@@ -12,6 +12,9 @@ analysis.py, via ffmpeg. See that module's docstring for exactly what's
 real vs. still-coarse-proxy vs. documented future work.
 """
 
+import os
+import tempfile
+
 from PyQt6 import (
     QtCore,
     QtGui,
@@ -513,6 +516,29 @@ def _tier_rank(file: File) -> int:
 _FILE_ROLE = QtCore.Qt.ItemDataRole.UserRole
 
 
+class SpectrogramDialog(QtWidgets.QDialog):
+    """Shows one rendered spectrogram PNG, scrollable at native size.
+
+    Deliberately dumb — no judgment, no thresholds, just the same
+    evidence the numeric checks already computed, in a form a human can
+    read in one glance (a cutoff wall, an elevated noise floor, an
+    asymmetric stereo image) — see analysis.generate_spectrogram().
+    """
+
+    def __init__(self, title: str, image_path: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Spectrogram — {title}")
+        pixmap = QtGui.QPixmap(image_path)
+        label = QtWidgets.QLabel(self)
+        label.setPixmap(pixmap)
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidget(label)
+        scroll.setWidgetResizable(False)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(scroll)
+        self.resize(min(pixmap.width() + 40, 1000), min(pixmap.height() + 60, 700))
+
+
 class CompareResultsPanel(QtWidgets.QDialog):
     """Non-modal panel listing every file in each shared-identity group.
 
@@ -564,11 +590,19 @@ class CompareResultsPanel(QtWidgets.QDialog):
         action_row = QtWidgets.QHBoxLayout()
         self.show_button = QtWidgets.QPushButton("Show in List", self)
         self.show_button.clicked.connect(self._show_in_list)
+        self.spectrogram_button = QtWidgets.QPushButton("Spectrogram…", self)
+        self.spectrogram_button.setToolTip(
+            "Render a log-frequency spectrogram for the selected file — see a cutoff "
+            "wall, elevated noise floor, or asymmetric stereo content directly, rather "
+            "than trusting a single number."
+        )
+        self.spectrogram_button.clicked.connect(self._show_spectrogram)
         self.remove_button = QtWidgets.QPushButton("Remove from Picard", self)
         self.remove_button.clicked.connect(self._remove_from_picard)
         self.trash_button = QtWidgets.QPushButton("Move to Trash…", self)
         self.trash_button.clicked.connect(self._trash_file)
         action_row.addWidget(self.show_button)
+        action_row.addWidget(self.spectrogram_button)
         action_row.addWidget(self.remove_button)
         action_row.addWidget(self.trash_button)
         action_row.addStretch(1)
@@ -693,6 +727,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
     def _update_button_states(self) -> None:
         has_file = self._current_file() is not None
         self.show_button.setEnabled(has_file)
+        self.spectrogram_button.setEnabled(has_file)
         self.remove_button.setEnabled(has_file)
         self.trash_button.setEnabled(has_file)
 
@@ -725,6 +760,54 @@ class CompareResultsPanel(QtWidgets.QDialog):
         tree.setCurrentItem(ui_item)
         tree.scrollToItem(ui_item)
         tree.setFocus()
+
+    def _show_spectrogram(self) -> None:
+        """Renders on a background thread (a real ffmpeg decode + image
+        render, same as a scan) and opens a SpectrogramDialog on success.
+        The rendered PNG lives in a temp file only long enough for
+        QPixmap's constructor to read it — that read is synchronous, so
+        it's safe to delete right after building the dialog.
+        """
+        file = self._current_file()
+        if file is None:
+            return
+        tagger_instance().window.set_statusbar_message(
+            "Rendering spectrogram for %(file)s…",
+            {'file': file.base_filename},
+            echo=None,
+        )
+        ffmpeg_path = self._ffmpeg_path
+        filename = file.filename
+        title = file.base_filename
+
+        def render() -> str | None:
+            fd, path = tempfile.mkstemp(suffix='.png', prefix='file_health_spectrogram_')
+            os.close(fd)
+            if analysis.generate_spectrogram(filename, path, ffmpeg_path=ffmpeg_path):
+                return path
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return None
+
+        def on_done(result: str | None = None, error: BaseException | None = None) -> None:
+            if error is not None or result is None:
+                tagger_instance().window.set_statusbar_message(
+                    "File Health: couldn't render a spectrogram for %(file)s",
+                    {'file': title},
+                    echo=None,
+                )
+                return
+            dialog = SpectrogramDialog(title, result, self)
+            dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.show()
+            try:
+                os.remove(result)
+            except OSError:
+                pass
+
+        run_task(render, on_done)
 
     def _remove_from_picard(self) -> None:
         file = self._current_file()
