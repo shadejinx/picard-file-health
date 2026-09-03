@@ -4,7 +4,7 @@ Session hit a context limit; this captures state for continuation in a fresh ses
 
 ## What this is
 
-A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 30 commits)
+A Picard v3 plugin (`~/Documents/code_repo/picard-file-health`, own git repo, 32 commits)
 that analyzes audio files for real quality defects — clipping, transcoding, phase issues,
 loudness — and surfaces them as an icon column in Picard's file/album tree, with a
 duplicate-comparison panel for deciding which copy of a matched recording is better.
@@ -60,6 +60,14 @@ history, or recreate similarly):
   wrapper, which doesn't write a parseable LAME tag) at known settings (`-V0`,
   `--lowpass N`, plain CBR) of `wideband_noise.wav`/`lowpassed_16k.wav` — validates
   the LAME-header low-pass cross-check's decisive-vs-heuristic-only boundary.
+- `/tmp/dr14test2/{uniform,one_loud,ramp,stereo_uniform,short,one_loud_44k,
+  ramp_44k}.wav` — synthetic multi-block sine WAVs (Python `wave`/`struct`, known
+  per-block amplitudes) built specifically to exercise DR14's top-20%-by-RMS and
+  2nd-highest-peak selection logic (a single loud block, a gradual ramp, ties, a
+  sub-one-block file, both 48kHz and 44100Hz for the sample-rate-fudge quirk) —
+  matched bit-for-bit against the reference `dr14meter` PyPI tool
+  (`python3 -m venv /tmp/dr14venv && /tmp/dr14venv/bin/pip install dr14meter`,
+  then `dr14meter -p -n -1 -b <dir>`) before being trusted.
 
 Always validate new ffmpeg-filter-based logic directly against real ffmpeg output
 first (`ffmpeg -i FILE -af FILTER -f null -`, read stderr) before writing parsing code
@@ -101,11 +109,34 @@ Six checks in `analysis.analyze_file()`:
    Gated on channel count ≥ 2 (derived free from counting "DC offset" occurrences
    in the already-fetched `astats` output — no extra ffprobe call).
 
-**Gradient** (only evaluated if no gate fired): coarse LUFS-integrated-loudness
-bucketing (Poor < -8, Ok < -11, Good < -16, else Excellent), referencing real
-industry loudness norms (streaming ~-14 LUFS, EBU broadcast ~-23 LUFS, loudness-war
-masters ~-8 LUFS or louder). Explicitly documented as NOT a true DR14 dynamic-range
-measurement (that needs block-based peak-vs-RMS analysis — not built).
+**Gradient** (only evaluated if no gate fired): a real DR14 dynamic-range
+measurement (Pleasurize Music Foundation "TT DR Meter" algorithm — non-
+overlapping 3-second blocks, top 20% loudest by RMS averaged in the power
+domain, compared against the *second*-highest peak across all blocks),
+replacing the old coarse LUFS-bucket proxy. `analysis._measure_dr14()`
+reimplements the algorithm against ffmpeg's own `astats` filter
+(`asetnsamples` to frame exact 3-second blocks, `reset=1` so each block's
+stats are independent, `ametadata=print` to dump per-block RMS_level/
+Peak_level) rather than decoding PCM and doing the math by hand — ffmpeg
+has no native DR14 filter, so the block-level numbers it already knows
+how to compute get combined into the real formula in Python. Needs one
+extra `ffprobe` call (sample rate, to size the 3-second block in
+samples) — `analysis._find_ffprobe()` looks for it alongside the
+configured `ffmpeg` binary, same as every mainstream ffmpeg distribution
+ships it. Validated bit-for-bit (not just "looks plausible") against the
+open-source reference implementation (`dr14meter`/`dr14_t.meter`, itself
+tested identical to the official Windows tool) on synthetic multi-block
+WAV fixtures with known per-block levels — 7/7 exact matches including a
+deliberately non-obvious case (an undocumented +60 samples/sec block-size
+quirk the reference tool applies *only* at exactly 44100Hz — confirmed
+empirically that omitting it flips the rounded DR value on boundary-case
+audio, so it's replicated rather than assumed to be a no-op artifact).
+Quality bands (Poor/Ok/Good/Great/Excellent) are grounded in the official
+TT DR Offline Meter manual's own documented color scale (red < DR8,
+green ≥ DR14, yellow between) and worked examples (DR9 called a "market-
+oriented compromise", DR12-14 called "more desirable") — not guessed.
+Finally puts the "Great" tier to use; it existed in `TIERS` but the old
+4-bucket LUFS gradient never produced it.
 
 **Informational only** (surfaced but never affects tier): mono content duplicated
 into both stereo channels — wasteful, not a defect.
@@ -116,15 +147,14 @@ last scan" (caveat: whole-file, so tag edits also trigger it, not just audio cha
 
 ## Not yet built (explicit roadmap, in priority order as last discussed)
 
-1. Real DR14 (block-based peak-vs-RMS dynamic range) — replace the coarse LUFS proxy.
-2. Bitrate-vs-codec-transparency scoring (MP3 ~256-320kbps, AAC ~192-256, Vorbis
+1. Bitrate-vs-codec-transparency scoring (MP3 ~256-320kbps, AAC ~192-256, Vorbis
    ~160-192, Opus ~96-128 — HydrogenAudio/Xiph consensus reference points).
-3. Sample-rate scoring.
-4. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
-5. Combining the now-4 separate `ffmpeg` subprocess calls per file into one
-   filtergraph (`asplit` into astats/volumedetect/loudnorm/aphasemeter branches) —
-   pure perf optimization, not correctness.
-6. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
+2. Sample-rate scoring.
+3. Hum/mains-noise detection (50/60Hz spike in quiet passages via FFT).
+4. Combining the now-5 separate `ffmpeg`/`ffprobe` subprocess calls per file into
+   one filtergraph (`asplit` into astats/volumedetect/loudnorm/aphasemeter/DR14
+   branches) — pure perf optimization, not correctness.
+5. Isolating `content_hash()` to just the decoded PCM stream (skip tag blocks) now
    that we decode audio anyway for the real checks — removes the false-positive
    "changed" flag on pure tag edits.
 
@@ -157,7 +187,12 @@ Explicitly dropped from scope (user decision, don't resurrect without re-asking)
   (uses `file.ui_item` to select+scroll+focus the real tree row — solves the
   problem of matched files sharing a display title, filename doesn't help
   correlate), "Remove from Picard" (`tagger.remove`), "Move to Trash…"
-  (`tagger.trash_files`, confirmed first).
+  (`tagger.trash_files`, confirmed first). Also has its own "Scan Unscanned"/
+  "Rescan All" buttons (dispatch the same `_scan_one`/`run_task` pattern as
+  `ScanHealthAction`) that redraw the panel in place via `refresh()` when scans
+  complete — no more closing and reopening the panel to see fresh results. The
+  panel tracks its own `(label, files)` groups so `refresh()` doesn't need the
+  caller to re-derive track groupings.
 - **Options page**: auto-scan toggle + ffmpeg path config (explicit path field +
   Browse/Detect Automatically/Get ffmpeg… buttons — the last opens the official
   download page in a browser, deliberately NOT a silent auto-download-and-execute
@@ -201,11 +236,7 @@ Explicitly dropped from scope (user decision, don't resurrect without re-asking)
 
 ## Immediate next action if resuming heuristics work
 
-LAME header inspection (item 2 of the old roadmap) is done — see the "Spectral
-cutoff / likely transcode" entry above. Pick up at item 1 of the current "not
-yet built" list (real DR14, block-based peak-vs-RMS dynamic range, replacing
-the coarse LUFS proxy). Follow the same validate-against-real-output-before-
-writing-code discipline used for every check so far — for DR14 that means a
-known-DR-value reference file (e.g. from a published DR database) or a
-synthesized signal with a hand-computed expected DR value, not just "looks
-reasonable."
+Real DR14 (item 1 of the old roadmap) is done — see the "Gradient" entry above.
+Pick up at item 1 of the current "not yet built" list (bitrate-vs-codec-
+transparency scoring). Follow the same validate-against-real-output-before-
+writing-code discipline used for every check so far.

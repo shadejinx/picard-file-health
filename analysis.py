@@ -7,14 +7,14 @@ clipping (astats Flat factor, calibrated threshold), True Peak
 inter-sample overs, spectral-cutoff/transcode detection (confirmed, when
 the file has one, against the LAME encoder's own embedded low-pass
 setting — decisive rather than heuristic evidence of a prior lossy
-generation), and out-of-phase channels. A coarse LUFS-based loudness
-gradient (Poor/Ok/Good/Excellent) approximates "how squashed the master
-might be" against real industry loudness norms (streaming ~-14 LUFS
-integrated, EBU R128 broadcast ~-23 LUFS, "loudness war" masters ~-8
-LUFS or louder) — explicitly NOT a true DR14 dynamic-range measurement,
-which needs block-based peak-vs-RMS analysis. Mono-duplicated-into-stereo
-is informational only, not a gate issue. Real DR14,
-bitrate-vs-codec-transparency scoring, sample-rate scoring, and hum
+generation), and out-of-phase channels. When no gate fires, the tier
+gradient (Poor/Ok/Good/Great/Excellent) is set by a real DR14 dynamic-
+range measurement (Pleasurize Music Foundation "TT DR Meter" algorithm,
+reimplemented against ffmpeg's own astats filter and validated bit-for-
+bit against the open-source reference implementation — see the DR14_*
+constants below) — not the LUFS-bucket proxy this used before. Mono-
+duplicated-into-stereo is informational only, not a gate issue.
+Bitrate-vs-codec-transparency scoring, sample-rate scoring, and hum
 detection are documented future work, not implemented here yet.
 """
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -69,11 +70,29 @@ MIN_FLAT_FACTOR_FOR_CLIPPING = 1.0
 # +3.71dBTP — a genuine, distinct defect Flat factor missed entirely.
 TRUE_PEAK_THRESHOLD_DBTP = 0.0
 
-# LUFS integrated-loudness thresholds for the coarse gradient (see module
-# docstring for the real-world reference points these approximate).
-LUFS_POOR_THRESHOLD = -8.0
-LUFS_OK_THRESHOLD = -11.0
-LUFS_GOOD_THRESHOLD = -16.0
+# Real-world DR14 quality bands, grounded in the official TT DR Offline
+# Meter manual's own documented color scale (red below DR8, green at
+# DR14+, yellow in between) and its worked examples (DR9 called a
+# "market-oriented compromise", DR12-14 called "more desirable") — not
+# guessed. Puts the previously-unused "Great" tier to work, since DR's
+# wider practical range (0-20+) has more useful resolution than LUFS did.
+DR14_POOR_THRESHOLD = 8
+DR14_OK_THRESHOLD = 10
+DR14_GOOD_THRESHOLD = 12
+DR14_GREAT_THRESHOLD = 14
+
+# DR14 algorithm parameters (Pleasurize Music Foundation "TT DR Meter"):
+# non-overlapping 3-second blocks, top 20% loudest (by RMS) compared
+# against the second-highest peak across all blocks.
+DR14_BLOCK_SECONDS = 3
+DR14_TOP_FRACTION = 0.2
+# The reference implementation widens the block by 60 samples/sec, but
+# ONLY at exactly 44100 Hz — an undocumented quirk of the official tool's
+# own block sizing. Confirmed empirically (synthetic boundary-case audio)
+# that omitting it flips the rounded DR value at 44.1kHz, the single most
+# common consumer sample rate, so it's replicated rather than dropped as
+# a presumed no-op historical artifact.
+DR14_SAMPLE_RATE_FUDGE_HZ = {44100: 60}
 
 FFMPEG_TIMEOUT_SECONDS = 60
 
@@ -97,6 +116,22 @@ def find_ffmpeg(explicit_path: str | None = None) -> str:
     if not path:
         raise FfmpegNotFoundError("ffmpeg not found on PATH")
     return path
+
+
+def _find_ffprobe(ffmpeg_path: str) -> str:
+    """ffprobe ships alongside ffmpeg in every mainstream distribution
+    (Homebrew, apt, the official static builds, Windows installers) —
+    same directory, same install. Falls back to a bare PATH search for a
+    non-standard install where that sibling binary isn't there.
+    """
+    ffprobe_name = 'ffprobe.exe' if ffmpeg_path.lower().endswith('.exe') else 'ffprobe'
+    sibling = os.path.join(os.path.dirname(ffmpeg_path), ffprobe_name)
+    if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+        return sibling
+    found = shutil.which(ffprobe_name)
+    if found:
+        return found
+    raise FfmpegNotFoundError("ffprobe not found (expected alongside ffmpeg)")
 
 
 def content_hash(filename: str) -> str:
@@ -220,6 +255,116 @@ def _read_lame_header(filename: str) -> LameHeader | None:
     return LameHeader(version=xing.lame_version_desc, lowpass_hz=lowpass or None)
 
 
+def _probe_sample_rate(ffprobe: str, filename: str) -> int | None:
+    """Only ffprobe call in the module — needed to size DR14's 3-second
+    blocks (in samples) before invoking ffmpeg's windowed astats pass.
+    """
+    proc = subprocess.run(
+        [
+            ffprobe, '-v', 'error', '-select_streams', 'a:0',
+            '-show_entries', 'stream=sample_rate',
+            '-of', 'default=noprint_wrappers=1:nokey=1', filename,
+        ],
+        capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_SECONDS, check=False,
+    )
+    try:
+        return int(proc.stdout.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _dr14_block_samples(sample_rate: int) -> int:
+    fudge = DR14_SAMPLE_RATE_FUDGE_HZ.get(sample_rate, 0)
+    return DR14_BLOCK_SECONDS * (sample_rate + fudge)
+
+
+_DR14_METRIC_RE = re.compile(r'lavfi\.astats\.(\d+)\.(RMS_level|Peak_level)=(-?[\d.]+|-?inf)')
+
+
+def _run_dr14_metadata(ffmpeg: str, filename: str, block_samples: int) -> str:
+    """One ffmpeg pass, framed into non-overlapping DR14 blocks
+    (`asetnsamples`, unpadded so a short final block isn't diluted with
+    zeros), astats reset every block so each block's stats are
+    independent (not cumulative), dumped as text metadata to stdout —
+    ffmpeg has no native DR14 filter, so the block-level RMS/Peak numbers
+    it already knows how to compute are combined into the real DR14
+    formula in Python (_compute_dr14), rather than reimplementing PCM
+    decode + windowed RMS/peak by hand.
+    """
+    proc = subprocess.run(
+        [
+            ffmpeg, '-nostdin', '-hide_banner', '-i', filename,
+            '-af',
+            f'asetnsamples=n={block_samples}:p=0,astats=metadata=1:reset=1,ametadata=print:file=-',
+            '-f', 'null', '-',
+        ],
+        capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_SECONDS, check=False,
+    )
+    return proc.stdout
+
+
+def _parse_dr14_blocks(stdout: str) -> dict[int, tuple[list[float], list[float]]]:
+    """Per channel: (per-block RMS_level dB, per-block Peak_level dB), one
+    pair of entries per DR14 block, in file order.
+    """
+    per_channel: dict[int, tuple[list[float], list[float]]] = {}
+    for frame_text in stdout.split('frame:')[1:]:
+        for m in _DR14_METRIC_RE.finditer(frame_text):
+            channel = int(m.group(1))
+            raw = m.group(3)
+            value = -200.0 if raw in ('-inf', 'inf') else float(raw)
+            rms_list, peak_list = per_channel.setdefault(channel, ([], []))
+            (rms_list if m.group(2) == 'RMS_level' else peak_list).append(value)
+    return per_channel
+
+
+def _compute_dr14(per_channel: dict[int, tuple[list[float], list[float]]]) -> int | None:
+    """Pleasurize Music Foundation DR14 formula, per channel then averaged:
+    top DR14_TOP_FRACTION of blocks by RMS (power-domain average, RMS
+    scaled by sqrt(2) — the official meter's own "+3dB so a sine wave
+    reads the same as its own peak" convention) compared against the
+    *second*-highest peak across all blocks (not the single highest, so
+    one outlier sample can't dominate). Validated bit-for-bit against the
+    open-source reference implementation (dr14meter/dr14_t.meter, itself
+    tested identical to the official Windows tool) on synthetic
+    multi-block fixtures with known per-block levels — see commit history.
+    """
+    channel_values: list[float] = []
+    for rms_db, peak_db in per_channel.values():
+        seg_cnt = len(rms_db)
+        if seg_cnt == 0:
+            continue
+        n_blk = max(1, math.floor(seg_cnt * DR14_TOP_FRACTION))
+        # Squaring folds the sqrt(2) "dr_rms" convention into a factor of
+        # 2 on each power-domain term.
+        dr_rms_sq_sorted = sorted(2.0 * (10.0 ** (db / 10.0)) for db in rms_db)
+        peak_linear_sorted = sorted(10.0 ** (db / 20.0) for db in peak_db)
+        rms_sum = sum(dr_rms_sq_sorted[-n_blk:])
+        if rms_sum <= 0:
+            channel_values.append(0.0)
+            continue
+        rms_quadratic_mean = math.sqrt(rms_sum / n_blk)
+        peak_index = -2 if len(peak_linear_sorted) >= 2 else -1
+        peak_second_highest = peak_linear_sorted[peak_index]
+        if peak_second_highest <= 0:
+            channel_values.append(0.0)
+            continue
+        channel_values.append(-20.0 * math.log10(rms_quadratic_mean / peak_second_highest))
+    if not channel_values:
+        return None
+    return round(sum(channel_values) / len(channel_values))
+
+
+def _measure_dr14(ffmpeg: str, ffprobe: str, filename: str) -> int | None:
+    sample_rate = _probe_sample_rate(ffprobe, filename)
+    if not sample_rate:
+        return None
+    block_samples = _dr14_block_samples(sample_rate)
+    stdout = _run_dr14_metadata(ffmpeg, filename, block_samples)
+    per_channel = _parse_dr14_blocks(stdout)
+    return _compute_dr14(per_channel)
+
+
 @dataclass
 class AnalysisResult:
     tier: str
@@ -231,6 +376,7 @@ class AnalysisResult:
     clipping_flat_factor: float
     spectral_energy_above_cutoff_db: float | None
     lame_lowpass_hz: int | None
+    dr14: int | None
 
 
 def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResult:
@@ -240,6 +386,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     branches) is a real future optimization once this is proven correct.
     """
     ffmpeg = find_ffmpeg(ffmpeg_path)
+    ffprobe = _find_ffprobe(ffmpeg)
 
     astats_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
     flat_factor, peak_db = _parse_astats(astats_stderr)
@@ -312,19 +459,28 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
             # doesn't affect the tier.
             info.append("Left/right channels are identical (mono content in a stereo container)")
 
+    dr14: int | None = None
+    if not issues:
+        # Only worth the extra ffprobe + windowed-astats pass when no gate
+        # already forced "Bad" — a defective file's dynamic range doesn't
+        # change its tier either way.
+        dr14 = _measure_dr14(ffmpeg, ffprobe, filename)
+
     if issues:
         tier = "Bad"
-    elif lufs is None:
+    elif dr14 is None:
         tier = "Excellent"
-    elif lufs > LUFS_POOR_THRESHOLD:
+    elif dr14 < DR14_POOR_THRESHOLD:
         tier = "Poor"
-        issues.append(f"Heavily compressed master (~{lufs:.1f} LUFS integrated)")
-    elif lufs > LUFS_OK_THRESHOLD:
+        issues.append(f"Heavily compressed master (DR{dr14})")
+    elif dr14 < DR14_OK_THRESHOLD:
         tier = "Ok"
-        issues.append(f"Compressed master (~{lufs:.1f} LUFS integrated)")
-    elif lufs > LUFS_GOOD_THRESHOLD:
+        issues.append(f"Compressed master (DR{dr14})")
+    elif dr14 < DR14_GOOD_THRESHOLD:
         tier = "Good"
-        issues.append(f"Moderately loud master (~{lufs:.1f} LUFS integrated)")
+        issues.append(f"Moderately compressed master (DR{dr14})")
+    elif dr14 < DR14_GREAT_THRESHOLD:
+        tier = "Great"
     else:
         tier = "Excellent"
 
@@ -338,4 +494,5 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         clipping_flat_factor=flat_factor,
         spectral_energy_above_cutoff_db=above_cutoff_db,
         lame_lowpass_hz=lame_lowpass_hz,
+        dr14=dr14,
     )
