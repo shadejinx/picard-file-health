@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -53,13 +54,17 @@ class FfmpegNotFoundError(RuntimeError):
     """Raised when the ffmpeg binary can't be located."""
 
 
-def find_ffmpeg() -> str:
+def find_ffmpeg(explicit_path: str | None = None) -> str:
     """Locate the ffmpeg binary.
 
-    TODO: make this configurable via the Options page (explicit path
-    setting + a guided find/download flow), the same pattern Picard's own
-    core uses for the AcoustID fpcalc path. Noted, not yet built.
+    Checks an explicit configured path first (Options page), falls back to
+    searching PATH, same pattern Picard's own core uses for the AcoustID
+    fpcalc path.
     """
+    if explicit_path:
+        if os.path.isfile(explicit_path) and os.access(explicit_path, os.X_OK):
+            return explicit_path
+        raise FfmpegNotFoundError(f"Configured ffmpeg path is not an executable file: {explicit_path}")
     path = shutil.which('ffmpeg')
     if not path:
         raise FfmpegNotFoundError("ffmpeg not found on PATH")
@@ -139,13 +144,13 @@ class AnalysisResult:
     spectral_energy_above_cutoff_db: float | None
 
 
-def analyze_file(filename: str) -> AnalysisResult:
+def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResult:
     """Runs on a background thread — real decode + measurement work, not
     instant. Three separate ffmpeg passes for clarity/robustness; combining
     into one filtergraph (asplit into astats/volumedetect/loudnorm branches)
     is a real future optimization once this is proven correct.
     """
-    ffmpeg = find_ffmpeg()
+    ffmpeg = find_ffmpeg(ffmpeg_path)
 
     astats_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
     flat_factor, peak_db = _parse_astats(astats_stderr)
