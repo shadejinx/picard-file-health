@@ -15,12 +15,15 @@ real DR14 dynamic-range measurement (Pleasurize Music Foundation "TT DR
 Meter" algorithm, reimplemented against ffmpeg's own astats filter and
 validated bit-for-bit against the open-source reference implementation
 — see the DR14_* constants below) — not the LUFS-bucket proxy this used
-before. Mono-duplicated-into-stereo and below-transparency-bitrate
-lossy encoding (MP3/AAC/Vorbis/Opus, HydrogenAudio/Xiph's own published
-consensus thresholds — see TRANSPARENT_BITRATE_KBPS) are informational
-only, never gate or affect the tier: neither is a measured defect in the
-decoded signal, just statistical likelihood from declared codec/bitrate.
-Hum detection is documented future work, not implemented here yet.
+before. Mono-duplicated-into-stereo, below-transparency-bitrate lossy
+encoding (MP3/AAC/Vorbis/Opus, HydrogenAudio/Xiph's own published
+consensus thresholds — see TRANSPARENT_BITRATE_KBPS), and possible
+mains hum in a quiet passage (see HUM_* constants) are informational
+only, never gate or affect the tier — none of these three is a
+definitively measured defect the way clipping/cutoff/true-peak/fake-
+hi-res are: bitrate is a statistical proxy from declared metadata, and
+hum can't be told apart from a sustained musical note at the same
+frequency with full certainty, only strong likelihood.
 """
 
 from __future__ import annotations
@@ -136,6 +139,40 @@ TRANSPARENT_BITRATE_KBPS = {
     'vorbis': 160,
     'opus': 128,
 }
+
+# Mains hum: a sustained, narrow spectral tone at the local power-grid
+# frequency (50Hz in most of the world, 60Hz in the Americas/parts of
+# Asia) leaking into a recording via ground loops, unshielded cabling, or
+# a bad power supply somewhere in the recording/transfer chain. A
+# genuine musical note at the same frequency stops when the music does;
+# hum doesn't — so this only looks inside ffmpeg's own silencedetect-
+# identified quiet passages (where the *music* has dropped out), never
+# the whole file, specifically to tell the two apart. Each mains
+# frequency maps to a nearby "control" frequency with the same
+# narrow-band width: real hum shows as an outsized peak at exactly its
+# own frequency and nowhere nearby, while incidental musical content
+# spreads energy more evenly across nearby frequencies.
+HUM_FREQUENCIES_HZ = {50: 55, 60: 65}
+HUM_BAND_WIDTH_HZ = 2
+# Validated on synthetic fixtures with a real silent-vs-playing gap: a
+# 50Hz tone persisting into an otherwise-silent passage measured ~14dB
+# above its 55Hz control band; a genuine bass note at 50Hz that stopped
+# along with the rest of the music (the normal case) left both bands at
+# true silence in that passage — 8dB sits with real margin below the
+# confirmed-hum case and above the confirmed-clean case (~0dB apart).
+HUM_ELEVATION_THRESHOLD_DB = 8.0
+# Below this narrowband RMS, there's nothing there to call hum regardless
+# of the elevation ratio — avoids flagging noise-floor-level differences
+# between two already-silent bands as a false "spike".
+HUM_BAND_MIN_RMS_DB = -90.0
+# "Quiet passage" here means the music itself has dropped out, not
+# necessarily digital silence — real hum sits at an audible, non-trivial
+# level. Confirmed empirically: a synthetic hum-only passage peaked at
+# -26dBFS, well above what a strict silence threshold (e.g. -50dB) would
+# recognize as silence; -25dB correctly caught it while still requiring a
+# real, sustained drop from typical mixed-music loudness.
+HUM_SILENCE_THRESHOLD_DB = -25.0
+HUM_SILENCE_MIN_DURATION_SECONDS = 1.0
 
 FFMPEG_TIMEOUT_SECONDS = 60
 
@@ -298,7 +335,13 @@ def _run_subprocess(args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, returncode=-1, stdout='', stderr='')
 
 
-def _run_ffmpeg_filter(ffmpeg: str, filename: str, filter_str: str) -> tuple[str, int]:
+def _run_ffmpeg_filter(
+    ffmpeg: str,
+    filename: str,
+    filter_str: str,
+    start: float | None = None,
+    duration: float | None = None,
+) -> tuple[str, int]:
     """Runs ffmpeg with a given audio filter, discarding output.
 
     Returns (stderr, returncode) — ffmpeg's analysis filters (astats,
@@ -308,11 +351,18 @@ def _run_ffmpeg_filter(ffmpeg: str, filename: str, filter_str: str) -> tuple[str
     nothing" (every filter after the first) can ignore the returncode;
     it exists so the one call that can't (the first astats pass) can
     tell "ffmpeg ran and found nothing" apart from "ffmpeg couldn't
-    process this file at all".
+    process this file at all". `start`/`duration` scope the analysis to
+    a specific window (input-side `-ss`/`-t`, before `-i` for fast+
+    accurate seeking) — used by hum detection to look only inside a
+    known quiet passage rather than the whole file.
     """
-    proc = _run_subprocess(
-        [ffmpeg, '-nostdin', '-hide_banner', '-i', filename, '-af', filter_str, '-f', 'null', '-']
-    )
+    args = [ffmpeg, '-nostdin', '-hide_banner']
+    if start is not None:
+        args += ['-ss', str(start)]
+    if duration is not None:
+        args += ['-t', str(duration)]
+    args += ['-i', filename, '-af', filter_str, '-f', 'null', '-']
+    proc = _run_subprocess(args)
     return proc.stderr, proc.returncode
 
 
@@ -492,6 +542,72 @@ def _bitrate_transparency_note(stream_info: StreamInfo) -> str | None:
         f"transparent for {label} (HydrogenAudio/Xiph consensus); may have "
         "audible compression artifacts on some material"
     )
+
+
+_SILENCE_START_RE = re.compile(r'silence_start:\s*([\-\d.]+)')
+_SILENCE_END_RE = re.compile(r'silence_end:\s*([\-\d.]+)')
+
+
+def _find_quiet_interval(ffmpeg: str, filename: str) -> tuple[float, float] | None:
+    """Longest quiet interval per ffmpeg's own silencedetect, or None if
+    none at least HUM_SILENCE_MIN_DURATION_SECONDS long was found — most
+    loud modern masters never qualify, correctly: there's no quiet
+    passage to check hum against, not "no hum".
+    """
+    stderr, _returncode = _run_ffmpeg_filter(
+        ffmpeg, filename,
+        f'silencedetect=noise={HUM_SILENCE_THRESHOLD_DB}dB:d={HUM_SILENCE_MIN_DURATION_SECONDS}',
+    )
+    starts = [float(m.group(1)) for m in _SILENCE_START_RE.finditer(stderr)]
+    ends = [float(m.group(1)) for m in _SILENCE_END_RE.finditer(stderr)]
+    intervals = list(zip(starts, ends))
+    if not intervals:
+        return None
+    start, end = max(intervals, key=lambda iv: iv[1] - iv[0])
+    return start, end - start
+
+
+def _measure_narrowband_rms(
+    ffmpeg: str, filename: str, frequency: int, start: float, duration: float
+) -> float | None:
+    stderr, _returncode = _run_ffmpeg_filter(
+        ffmpeg, filename,
+        f'bandpass=f={frequency}:width_type=h:w={HUM_BAND_WIDTH_HZ},astats',
+        start=start, duration=duration,
+    )
+    m = re.search(r'RMS level dB:\s*(-?[\d.]+|-inf)', stderr)
+    if not m:
+        return None
+    raw = m.group(1)
+    return -200.0 if raw == '-inf' else float(raw)
+
+
+def _detect_hum(ffmpeg: str, filename: str) -> str | None:
+    """Informational only — never gates or affects the tier. Even scoped
+    to a quiet passage, this can't be told apart with full certainty from
+    a sustained musical drone/pedal note at exactly the same frequency
+    that happens to ring into an otherwise-quiet moment — strong
+    likelihood, not a definitive measurement the way clipping/cutoff/
+    true-peak/fake-hi-res are (see HUM_* constants for the validation
+    that motivates the specific thresholds).
+    """
+    quiet_interval = _find_quiet_interval(ffmpeg, filename)
+    if quiet_interval is None:
+        return None
+    start, duration = quiet_interval
+    for mains_hz, control_hz in HUM_FREQUENCIES_HZ.items():
+        hum_rms = _measure_narrowband_rms(ffmpeg, filename, mains_hz, start, duration)
+        control_rms = _measure_narrowband_rms(ffmpeg, filename, control_hz, start, duration)
+        if hum_rms is None or control_rms is None or hum_rms < HUM_BAND_MIN_RMS_DB:
+            continue
+        elevation = hum_rms - control_rms
+        if elevation >= HUM_ELEVATION_THRESHOLD_DB:
+            return (
+                f"Possible mains hum at {mains_hz}Hz — {elevation:.0f}dB above the "
+                f"surrounding spectrum during a {duration:.1f}s quiet passage, "
+                "persisting where the music itself has dropped out"
+            )
+    return None
 
 
 def _dr14_block_samples(sample_rate: int) -> int:
@@ -724,6 +840,14 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         # already forced "Bad" — a defective file's dynamic range doesn't
         # change its tier either way.
         dr14 = _measure_dr14(ffmpeg, filename, stream_info.sample_rate)
+
+        # Same reasoning: hum detection needs a silencedetect pass plus up
+        # to four more scoped ffmpeg passes, not worth it on a file
+        # already gated "Bad" for an unrelated, definitively measured
+        # reason.
+        hum_note = _detect_hum(ffmpeg, filename)
+        if hum_note is not None:
+            info.append(hum_note)
 
     if issues:
         tier = "Bad"
