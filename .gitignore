@@ -9,3 +9,7 @@ __pycache__/
 # Distribution / packaging
 *.egg-info/
 dist/
+
+# Local test fixtures (real/copyrighted audio, machine-specific, never committed)
+assets/
+.DS_Store

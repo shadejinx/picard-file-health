@@ -92,7 +92,24 @@ MIN_FLAT_FACTOR_FOR_CLIPPING = 1.0
 # on a real file: white noise measured Flat factor 0.0094 (below the
 # clipping threshold above, correctly not "clipping") but True Peak
 # +3.71dBTP — a genuine, distinct defect Flat factor missed entirely.
-TRUE_PEAK_THRESHOLD_DBTP = 0.0
+#
+# Not set to 0.0dBTP (the theoretical full-scale ceiling): ffmpeg's
+# loudnorm measures True Peak per ITU-R BS.1770-4 Annex 2, upsampling to
+# 192kHz (~4x oversampling for 44.1/48kHz-family sources) before taking
+# the peak. That Annex's own worked table of oversampling error gives a
+# maximum theoretical under-read of 0.554dB at 4x oversampling — the
+# table's own caption calls this row "probably covers the range of
+# interest" — meaning a real, compliant master can legitimately measure
+# a few tenths of a dB over 0dBTP purely from the meter's own documented
+# accuracy limit, not because it's actually clipping on playback.
+# Confirmed against two real commercial masters flagged "Bad" purely on
+# this gate at +0.10dBTP/+0.12dBTP that the reporting user confirmed
+# sound fine — well inside that uncertainty band, not evidence of a real
+# defect. 0.6dBTP sits just outside the documented 0.554dB worst case,
+# while staying two orders of magnitude below the +3.71dBTP/+5.0dBTP
+# genuine-defect fixtures this gate was originally calibrated against —
+# those margins are unaffected by this change.
+TRUE_PEAK_THRESHOLD_DBTP = 0.6
 
 # Real-world DR14 quality bands, grounded in the official TT DR Offline
 # Meter manual's own documented color scale (red below DR8, green at

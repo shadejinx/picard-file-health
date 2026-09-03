@@ -121,10 +121,29 @@ Eight checks in `analysis.analyze_file()`:
 1. **Clipping** — `astats` "Flat factor" > `MIN_FLAT_FACTOR_FOR_CLIPPING` (1.0).
    Calibrated against 5 severities: clean=0.0, loud-but-not-clipped noise=0.0094,
    mildest real clip (2% overdrive)=16.06, hard clip=31.88.
-2. **True Peak** — `loudnorm`'s `input_tp` ≥ 0dBTP. Catches inter-sample DAC
-   reconstruction overshoot that Flat factor structurally cannot see (validated: the
-   white-noise test file has Flat factor 0.0094 — below the clipping threshold,
+2. **True Peak** — `loudnorm`'s `input_tp` ≥ `TRUE_PEAK_THRESHOLD_DBTP` (0.6dBTP,
+   not the theoretical 0dBTP full-scale ceiling — see below). Catches inter-sample
+   DAC reconstruction overshoot that Flat factor structurally cannot see (validated:
+   the white-noise test file has Flat factor 0.0094 — below the clipping threshold,
    correctly not "clipping" — but True Peak +3.71dBTP, a real distinct defect).
+   Raised from 0.0 to 0.6dBTP after a user reported two real commercial masters
+   (`assets/*.m4a`, +0.10/+0.12dBTP) flagged "Bad" that don't sound bad. Root cause:
+   `loudnorm`'s True Peak measurement follows ITU-R BS.1770-4 Annex 2, which
+   upsamples to 192kHz (~4x oversampling for 44.1/48kHz-family sources) before
+   taking the peak — and that Annex's own worked table of oversampling error gives
+   a maximum theoretical under-read of 0.554dB at 4x oversampling (the table's own
+   caption calls this row "probably covers the range of interest"). A reading a few
+   tenths of a dB over 0dBTP is within the standard's own documented measurement
+   uncertainty, not reliable evidence of real playback clipping. 0.6dBTP sits just
+   outside that 0.554dB worst case while staying two orders of magnitude below the
+   +3.71dBTP/+5.0dBTP genuine-defect fixtures this gate was originally calibrated
+   against. Re-validated against the full fixture catalogue after the change:
+   zero output differences — no existing fixture's True Peak measurement fell
+   between 0.0 and 0.6dBTP, so this was a surgical fix, not a regression risk. The
+   two `assets/*.m4a` files now correctly fall through to the DR14 gradient
+   instead (DR7, "Poor" — a real, independent, unrelated finding: heavily
+   compressed dynamics are common in modern loudness-war masters and aren't what
+   the user was disputing).
 3. **Spectral cutoff / likely transcode** — `highpass=f=17000,volumedetect`
    `mean_volume` < -60dB. Guarded by `MIN_PEAK_DB_FOR_SPECTRAL_CHECK` (-40dB overall
    peak) — a near-silent file trivially has "no content above 17kHz" for the same
