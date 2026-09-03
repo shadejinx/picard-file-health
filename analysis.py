@@ -152,10 +152,29 @@ def _parse_loudnorm(stderr: str) -> tuple[float | None, float | None]:
         return None, None
 
 
+def _channel_count(astats_stderr: str) -> int:
+    """astats prints one 'DC offset' line per channel, plus one for the
+    combined "Overall" block — count() - 1 gives the channel count without
+    a second ffprobe call or subprocess.
+    """
+    return max(0, astats_stderr.count('DC offset') - 1)
+
+
+def _parse_phasemeter(stderr: str) -> tuple[bool, bool]:
+    """Returns (is_mono_duplicated, is_out_of_phase).
+
+    aphasemeter's own phasing=1 mode does the classification (tolerance/
+    angle thresholds are ffmpeg's own, not something calibrated here) —
+    presence of these markers in stderr is the whole signal.
+    """
+    return 'mono_start' in stderr, 'out_phase_start' in stderr
+
+
 @dataclass
 class AnalysisResult:
     tier: str
     issues: list[str]
+    info: list[str]
     content_hash: str
     lufs: float | None
     true_peak_dbtp: float | None
@@ -165,14 +184,15 @@ class AnalysisResult:
 
 def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResult:
     """Runs on a background thread — real decode + measurement work, not
-    instant. Three separate ffmpeg passes for clarity/robustness; combining
-    into one filtergraph (asplit into astats/volumedetect/loudnorm branches)
-    is a real future optimization once this is proven correct.
+    instant. Separate ffmpeg passes for clarity/robustness; combining into
+    one filtergraph (asplit into astats/volumedetect/loudnorm/aphasemeter
+    branches) is a real future optimization once this is proven correct.
     """
     ffmpeg = find_ffmpeg(ffmpeg_path)
 
     astats_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
     flat_factor, peak_db = _parse_astats(astats_stderr)
+    channels = _channel_count(astats_stderr)
 
     cutoff_stderr = _run_ffmpeg_filter(
         ffmpeg, filename, f'highpass=f={SPECTRAL_CUTOFF_FREQUENCY_HZ},volumedetect'
@@ -183,6 +203,8 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     lufs, true_peak = _parse_loudnorm(loudnorm_stderr)
 
     issues: list[str] = []
+    info: list[str] = []
+
     has_clipping = flat_factor > MIN_FLAT_FACTOR_FOR_CLIPPING
     if has_clipping:
         issues.append("Clipping detected")
@@ -205,6 +227,22 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
             "(likely transcoded from a lossy source)"
         )
 
+    # Phase/channel-identity checks need two channels to compare — meaningless
+    # (and aphasemeter would just misbehave) on mono source material.
+    if channels >= 2:
+        phase_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'aphasemeter=video=0:phasing=1')
+        is_mono_duplicated, is_out_of_phase = _parse_phasemeter(phase_stderr)
+        if is_out_of_phase:
+            # A real, audible defect — will cancel out when summed to mono
+            # (many phone/laptop/car speakers do this) — a genuine gate
+            # issue, not just informational.
+            issues.append("Channels are out of phase (cancels out when played back in mono)")
+        if is_mono_duplicated:
+            # Not a quality defect — a mono source duplicated into both
+            # channels loses nothing, it's just wasteful. Informational,
+            # doesn't affect the tier.
+            info.append("Left/right channels are identical (mono content in a stereo container)")
+
     if issues:
         tier = "Bad"
     elif lufs is None:
@@ -224,6 +262,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     return AnalysisResult(
         tier=tier,
         issues=issues,
+        info=info,
         content_hash=content_hash(filename),
         lufs=lufs,
         true_peak_dbtp=true_peak,

@@ -60,6 +60,7 @@ def _scan_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
     return {
         'tier': result.tier,
         'flags': "; ".join(result.issues),
+        'info': "; ".join(result.info),
         'content_hash': result.content_hash,
     }
 
@@ -78,6 +79,7 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
             changed = bool(previous_hash) and previous_hash != result['content_hash']
             file.metadata['~health_tier'] = result['tier']
             file.metadata['~health_flags'] = result['flags']
+            file.metadata['~health_info'] = result['info']
             file.metadata['~health_content_hash'] = result['content_hash']
             file.metadata['~health_changed_since_scan'] = '1' if changed else ''
     file.clear_pending()
@@ -499,9 +501,11 @@ class HealthProvider(ColumnValueProvider, DelegateProvider):
         if not tier:
             return None
         stored_flags = column_method('~health_flags')
+        stored_info = column_method('~health_info')
         return {
             'tier': tier,
             'issues': stored_flags.split("; ") if stored_flags else [],
+            'info': stored_info.split("; ") if stored_info else [],
             'changed_since_scan': bool(column_method('~health_changed_since_scan')),
         }
 
@@ -560,6 +564,7 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
     def _format_tooltip(self, info: dict[str, object]) -> str:
         tier = info['tier']
         issues = info['issues']
+        notes = info.get('info') or []
         parts = [f"<b>{tier}</b>"]
         if info.get('changed_since_scan'):
             parts.append(
@@ -570,6 +575,13 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
             parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
         else:
             parts.append("<br>No issues detected")
+        if notes:
+            # Informational only — doesn't affect the tier (e.g. mono
+            # content in a stereo container isn't a defect, just a note).
+            note_items = "".join(f"<li>{note}</li>" for note in notes)
+            parts.append(
+                f"<div style='color:#7f8c8d;'>Note:<ul style='margin-left:-20px;'>{note_items}</ul></div>"
+            )
         return f"<div style='white-space:nowrap;'>{''.join(parts)}</div>"
 
     def helpEvent(
@@ -653,6 +665,11 @@ def enable(api: PluginApi) -> None:
         '_health_flags',
         documentation="Itemized list of issues found by the last scan.",
         title="Health flags",
+    )
+    api.register_script_variable(
+        '_health_info',
+        documentation="Informational notes that don't affect the health tier (e.g. mono content in a stereo container).",
+        title="Health info",
     )
     api.register_script_variable(
         '_health_content_hash',
