@@ -31,6 +31,15 @@ import subprocess
 SPECTRAL_SILENCE_THRESHOLD_DB = -60.0
 SPECTRAL_CUTOFF_FREQUENCY_HZ = 17000
 
+# Below this overall peak level, a file has essentially no real audio
+# content anywhere — the spectral-cutoff check becomes meaningless (a
+# near-silent file trivially has "no content above 17kHz" for the same
+# reason it has no content anywhere, not because of a lossy encoder's
+# lowpass filter). Empirically found: a ~0.13s near-silent test fixture
+# peaked at -74dB overall and falsely tripped the cutoff gate at -91dB
+# above 17kHz before this guard was added.
+MIN_PEAK_DB_FOR_SPECTRAL_CHECK = -40.0
+
 # LUFS integrated-loudness thresholds for the coarse gradient (see module
 # docstring for the real-world reference points these approximate).
 LUFS_POOR_THRESHOLD = -8.0
@@ -139,7 +148,7 @@ def analyze_file(filename: str) -> AnalysisResult:
     ffmpeg = find_ffmpeg()
 
     astats_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
-    flat_factor, _peak_db = _parse_astats(astats_stderr)
+    flat_factor, peak_db = _parse_astats(astats_stderr)
 
     cutoff_stderr = _run_ffmpeg_filter(
         ffmpeg, filename, f'highpass=f={SPECTRAL_CUTOFF_FREQUENCY_HZ},volumedetect'
@@ -154,7 +163,10 @@ def analyze_file(filename: str) -> AnalysisResult:
     if has_clipping:
         issues.append("Clipping detected")
 
-    has_cutoff = above_cutoff_db is not None and above_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB
+    has_signal = peak_db is not None and peak_db > MIN_PEAK_DB_FOR_SPECTRAL_CHECK
+    has_cutoff = (
+        has_signal and above_cutoff_db is not None and above_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB
+    )
     if has_cutoff:
         issues.append(
             f"No real content above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz "
