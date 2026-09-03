@@ -103,6 +103,30 @@ BANDWIDTH_PROBE_FREQUENCIES_HZ = (
 # this project's own single synthetic sine/lowpass fixture.
 BANDWIDTH_PEAK_RELATIVE_DB = 65.0
 
+# File-integrity signature: astats already reports Max_difference (the
+# single largest sample-to-sample jump anywhere in the track) and
+# Mean_difference (the typical jump) in the same main branch already
+# parsed above — no new ffmpeg pass. An isolated corruption artifact
+# (a bit-flipped sample, a dropped/zeroed buffer) produces a
+# sample-to-sample jump far outside what the track's own bandwidth and
+# level would otherwise produce, spiking Max_difference while barely
+# moving Mean_difference (it's one or a few samples diluted across the
+# whole track). Empirically validated on synthetic fixtures against
+# real content, not guessed:
+#   clean sine tone                              ratio ~1.6
+#   real quiet music (health-demo-files/song-a)   ratio ~7.6  <- highest seen in real content
+#   synthetic 50-sample zeroed dropout            ratio ~7.1
+#   synthetic single-sample full-scale glitch     ratio ~74.8
+# The honest finding: a moderate threshold (e.g. ~10x) would false-
+# positive on legitimate quiet real music, which already reaches ~7.6x
+# on its own. This is deliberately conservative — it catches only
+# severe, unambiguous corruption (comfortably below the confirmed-glitch
+# case, comfortably above every real-content case measured) and stays
+# informational rather than a gate, the same tier of certainty as hum
+# detection: a real signal, not a proof, for subtler corruption this
+# can't reliably separate from legitimate transient content.
+CORRUPTION_DIFFERENCE_RATIO_THRESHOLD = 20.0
+
 # Minimum astats "Flat factor" to count as real clipping, not incidental
 # same-value runs in loud content. Empirically calibrated: a clean quiet
 # file measured 0.0, genuinely loud (but not clipped) white noise measured
@@ -568,6 +592,33 @@ def _parse_astats(stderr: str) -> tuple[float, float | None]:
     for m in re.finditer(r'Peak level dB:\s*([\-\d.]+)', stderr):
         peak_db = float(m.group(1))
     return flat_factor, peak_db
+
+
+def _detect_corruption_signature(main_stderr: str) -> str | None:
+    """Informational only — never gates or affects the tier (see
+    CORRUPTION_DIFFERENCE_RATIO_THRESHOLD for why: it's deliberately
+    conservative, catching only severe, unambiguous jumps, not proof of
+    corruption the way clipping/cutoff/true-peak/fake-hi-res are).
+    Reuses the same main astats branch _parse_astats already parsed —
+    Max_difference and Mean_difference are both already computed by the
+    one merged decode, no new ffmpeg pass.
+    """
+    max_diff = None
+    mean_diff = None
+    for m in re.finditer(r'Max difference:\s*([\d.]+)', main_stderr):
+        max_diff = float(m.group(1))
+    for m in re.finditer(r'Mean difference:\s*([\d.]+)', main_stderr):
+        mean_diff = float(m.group(1))
+    if max_diff is None or not mean_diff:
+        return None
+    ratio = max_diff / mean_diff
+    if ratio < CORRUPTION_DIFFERENCE_RATIO_THRESHOLD:
+        return None
+    return (
+        f"Possible data corruption — one or more sample-to-sample jumps "
+        f"{ratio:.0f}x larger than the track's typical jump size, consistent "
+        "with a bit error or dropped audio buffer rather than real content"
+    )
 
 
 def _parse_mean_volume(stderr: str) -> float | None:
@@ -1038,13 +1089,15 @@ def analyze_file(
             f"ffmpeg couldn't decode {os.path.basename(filename)} as audio "
             "(corrupt, truncated, unsupported format, or a decode timeout) — not scored"
         )
-    flat_factor, peak_db = _parse_astats(_filter_instance_output(merged_stderr, 'main'))
+    main_stderr = _filter_instance_output(merged_stderr, 'main')
+    flat_factor, peak_db = _parse_astats(main_stderr)
     above_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'cutoff'))
     lufs, true_peak = _parse_loudnorm(merged_stderr)
     # Informational only, for the compare panel's ranking — doesn't feed
     # `issues`/tier (see BANDWIDTH_* constants for why this is a
     # continuous, cause-agnostic estimate rather than a defect gate).
     spectral_bandwidth_hz = _measure_bandwidth(merged_stderr, stream_info.sample_rate, peak_db)
+    corruption_note = _detect_corruption_signature(main_stderr)
 
     issues: list[str] = []
     info: list[str] = []
@@ -1052,6 +1105,9 @@ def analyze_file(
     bitrate_note = _bitrate_transparency_note(stream_info)
     if bitrate_note is not None:
         info.append(bitrate_note)
+
+    if corruption_note is not None:
+        info.append(corruption_note)
 
     has_clipping = flat_factor > thresholds.clip_flat_factor
     if has_clipping:
