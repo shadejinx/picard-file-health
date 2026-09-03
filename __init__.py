@@ -50,32 +50,36 @@ TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
 
 
 class _SensitivitySlider(QtWidgets.QFrame):
-    """One labeled slider bound to an integer-scaled float gate threshold.
+    """A discrete step-based slider bound to a real gate threshold.
 
-    Rendered as its own bordered frame (title, slider, one short caption)
-    so adjacent sliders in a options-page column read as distinct
+    Each step is a (value, hint) pair: `value` is the actual threshold
+    passed to analysis.Thresholds, `hint` is a short plain-language
+    description of what that step catches — swapped in live as the
+    slider moves, so the user feels where a setting lands before
+    committing to it rather than reading a bare, uncontextualized
+    number. Steps are hand-picked non-linear points grounded in this
+    plugin's own calibration data (see the step tables in
+    HealthOptionsPage.__init__), not an even split of the numeric
+    range — the meaningful transitions in each measurement (e.g.
+    clipping's Flat factor) aren't evenly spaced either.
+
+    Rendered as its own bordered frame (title, slider, hint) so
+    adjacent sliders in an options-page column read as distinct
     controls rather than a wall of unattributed hint text.
-
-    QSlider is integer-only; `scale` converts between the slider's
-    integer steps and the underlying float value (e.g. scale=10 gives
-    0.1 precision). `fmt` renders the live value into the header label.
     """
 
     def __init__(
         self,
         title: str,
-        description: str,
-        minimum: float,
-        maximum: float,
-        default: float,
-        scale: float,
+        steps: list[tuple[float, str]],
+        default_index: int,
         fmt: str,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._scale = scale
+        self._steps = steps
         self._fmt = fmt
-        self._default = default
+        self._default_index = default_index
 
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         layout = QtWidgets.QVBoxLayout(self)
@@ -93,32 +97,103 @@ class _SensitivitySlider(QtWidgets.QFrame):
         layout.addLayout(header)
 
         self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self)
-        self.slider.setMinimum(round(minimum * scale))
-        self.slider.setMaximum(round(maximum * scale))
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(len(steps) - 1)
+        self.slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
+        self.slider.setTickInterval(1)
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(1)
         self.slider.valueChanged.connect(self._on_changed)
         layout.addWidget(self.slider)
 
-        detail = QtWidgets.QLabel(description, self)
-        detail.setWordWrap(True)
-        muted = detail.font()
+        self.hint_label = QtWidgets.QLabel(self)
+        self.hint_label.setWordWrap(True)
+        muted = self.hint_label.font()
         muted.setPointSize(max(muted.pointSize() - 1, 8))
-        detail.setFont(muted)
-        detail.setStyleSheet("color: palette(mid);")
-        layout.addWidget(detail)
+        self.hint_label.setFont(muted)
+        self.hint_label.setStyleSheet("color: palette(mid);")
+        layout.addWidget(self.hint_label)
 
-        self.set_value(default)
+        self.slider.setValue(default_index)
+        self._on_changed(default_index)
 
-    def _on_changed(self, raw: int) -> None:
-        self.value_label.setText(self._fmt.format(raw / self._scale))
+    def _on_changed(self, index: int) -> None:
+        value, hint = self._steps[index]
+        self.value_label.setText(self._fmt.format(value))
+        self.hint_label.setText(hint)
 
     def value(self) -> float:
-        return self.slider.value() / self._scale
+        return self._steps[self.slider.value()][0]
 
     def set_value(self, value: float) -> None:
-        self.slider.setValue(round(value * self._scale))
+        closest = min(range(len(self._steps)), key=lambda i: abs(self._steps[i][0] - value))
+        self.slider.setValue(closest)
 
     def reset_to_default(self) -> None:
-        self.set_value(self._default)
+        self.slider.setValue(self._default_index)
+
+
+# Each gate's sensitivity slider has 10 hand-picked, non-linear steps —
+# grounded in analysis.py's own calibration data (see the cited margins
+# in each list) rather than an even split of the numeric range, since
+# the meaningful transitions in each measurement aren't evenly spaced
+# either. (value, hint) pairs, ordered lenient -> strict.
+
+_CLIP_STEPS: list[tuple[float, str]] = [
+    (25.0, "Only catches severe, obvious clipping — a wall of distortion."),
+    (20.0, "Catches heavy clipping most listeners would notice immediately."),
+    (16.0, "Catches clipping close to the mildest real case we've measured."),
+    (8.0, "Catches moderate clipping — likely audible as harshness."),
+    (4.0, "Catches light clipping — may be audible on close listening."),
+    (2.0, "Catches subtle clipping most listeners wouldn't notice."),
+    (1.0, "Balanced default — catches real clipping without flagging clean loud audio."),
+    (0.5, "More sensitive than default — may flag some loud-but-clean audio."),
+    (0.1, "Very sensitive — likely to flag loud, dense mixes that aren't clipped."),
+    (0.05, "Extremely sensitive — expect false positives on loud modern masters."),
+]
+_CLIP_DEFAULT_INDEX = 6  # matches analysis.MIN_FLAT_FACTOR_FOR_CLIPPING (1.0)
+
+_TRUE_PEAK_STEPS: list[tuple[float, str]] = [
+    (3.0, "Only catches extreme overs — several dB past full volume."),
+    (2.0, "Catches clearly audible inter-sample overshoot."),
+    (1.5, "Catches overshoot well beyond normal mastering tolerance."),
+    (1.0, "Catches overshoot beyond typical mastering headroom."),
+    (0.8, "Slightly stricter than the meter's own accuracy margin."),
+    (0.6, "Balanced default — just past the true-peak meter's own accuracy limit."),
+    (0.4, "Tighter than the meter's documented accuracy — may flag compliant masters."),
+    (0.2, "Close to full scale — likely to flag normally-mastered loud tracks."),
+    (0.1, "Right at the meter's own noise floor — expect false positives."),
+    (0.0, "Flags anything technically over full scale, including measurement noise."),
+]
+_TRUE_PEAK_DEFAULT_INDEX = 5  # matches analysis.TRUE_PEAK_THRESHOLD_DBTP (0.6)
+
+_SPECTRAL_STEPS: list[tuple[float, str]] = [
+    (-90.0, "Only catches files with near-total silence up top — very few false positives."),
+    (-85.0, "Requires close to true silence above the cutoff."),
+    (-75.0, "Requires strong silence above the cutoff frequency."),
+    (-65.0, "Slightly more sensitive than default."),
+    (-60.0, "Balanced default — matches real transcodes we've tested."),
+    (-55.0, "Slightly more likely to flag quiet-but-real high frequencies."),
+    (-50.0, "Moderately sensitive — may flag naturally soft treble."),
+    (-45.0, "Sensitive — may flag mellow or bass-heavy mixes."),
+    (-35.0, "Very sensitive — expect false positives on quiet acoustic material."),
+    (-30.0, "Extremely sensitive — likely to flag many legitimate files."),
+]
+_SPECTRAL_DEFAULT_INDEX = 4  # matches analysis.SPECTRAL_SILENCE_THRESHOLD_DB (-60)
+
+_PHASE_STEPS: list[tuple[float, str]] = [
+    (179.0, "Only catches near-perfect phase inversion."),
+    (177.0, "Requires almost exact inversion."),
+    (174.0, "Slightly more sensitive than ffmpeg's own default."),
+    (170.0, "ffmpeg's own default — catches clear phase problems."),
+    (165.0, "Slightly more sensitive — may catch wide stereo effects."),
+    (158.0, "Moderately sensitive — intentional stereo widening may trigger this."),
+    (150.0, "Sensitive — likely to flag wide mixes or reverb-heavy tracks."),
+    (140.0, "Very sensitive — many wide stereo mixes will trigger this."),
+    (120.0, "Extremely sensitive — most stereo content will trigger this."),
+    (95.0, "Nearly any decorrelated stereo signal will trigger this."),
+]
+_PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
 
 
 def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
@@ -257,40 +332,26 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addWidget(sensitivity_intro)
 
         self.clip_slider = _SensitivitySlider(
-            "Clipping",
-            "How much flat, repeated-sample distortion counts as clipping. Lower = stricter.",
-            minimum=0.1, maximum=30.0, default=analysis.MIN_FLAT_FACTOR_FOR_CLIPPING,
-            scale=10, fmt="{:.1f}", parent=self,
+            "Clipping", _CLIP_STEPS, _CLIP_DEFAULT_INDEX, fmt="{:g}", parent=self,
         )
         sensitivity_layout.addWidget(self.clip_slider)
         sensitivity_layout.addSpacing(8)
 
         self.true_peak_slider = _SensitivitySlider(
-            "True Peak",
-            "How far a sound can peak past full volume before it's flagged as a defect. "
-            "Higher = more tolerant.",
-            minimum=-3.0, maximum=3.0, default=analysis.TRUE_PEAK_THRESHOLD_DBTP,
-            scale=10, fmt="{:+.1f} dBTP", parent=self,
+            "True Peak", _TRUE_PEAK_STEPS, _TRUE_PEAK_DEFAULT_INDEX, fmt="{:+.1f} dBTP", parent=self,
         )
         sensitivity_layout.addWidget(self.true_peak_slider)
         sensitivity_layout.addSpacing(8)
 
         self.spectral_silence_slider = _SensitivitySlider(
             "Missing Treble (Transcode / Fake Hi-Res)",
-            "How much high-end silence counts as a lossy re-encode or fake hi-res file. "
-            "Lower = stricter.",
-            minimum=-90.0, maximum=-30.0, default=analysis.SPECTRAL_SILENCE_THRESHOLD_DB,
-            scale=1, fmt="{:.0f} dB", parent=self,
+            _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self,
         )
         sensitivity_layout.addWidget(self.spectral_silence_slider)
         sensitivity_layout.addSpacing(8)
 
         self.phase_angle_slider = _SensitivitySlider(
-            "Out-of-Phase Channels",
-            "How close to fully inverted the left/right channels must be to count as "
-            "out-of-phase. Lower = stricter.",
-            minimum=90.0, maximum=180.0, default=analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG,
-            scale=1, fmt="{:.0f}\u00b0", parent=self,
+            "Out-of-Phase Channels", _PHASE_STEPS, _PHASE_DEFAULT_INDEX, fmt="{:.0f}\u00b0", parent=self,
         )
         sensitivity_layout.addWidget(self.phase_angle_slider)
 
