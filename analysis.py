@@ -366,6 +366,87 @@ def _run_ffmpeg_filter(
     return proc.stderr, proc.returncode
 
 
+def _filter_instance_output(stderr: str, tag: str) -> str:
+    """Slices one named filter instance's lines back out of a merged
+    multi-branch invocation's combined stderr (see _run_merged_analysis).
+
+    ffmpeg tags every log line a `filtername@tag` instance prints with a
+    stable `[filtername@tag @ 0xADDR]` prefix (confirmed empirically
+    against a real multi-branch `asplit` filtergraph) — letting each
+    existing single-filter parser (_parse_astats, _parse_mean_volume,
+    ...) run unmodified against just its own branch's output, so two
+    filters of the same type in one invocation (astats appears at most
+    once here; volumedetect can appear twice, for the ordinary
+    spectral-cutoff check and the fake-hi-res check) never contaminate
+    each other's "last match wins" parsing. loudnorm is the one
+    exception: it prints its tag once, then a raw untagged JSON blob —
+    but only one loudnorm branch ever exists and its JSON shape is
+    already unambiguous in the full combined stderr, so _parse_loudnorm
+    is called against the whole string directly rather than through
+    this slice.
+    """
+    marker = f'@{tag} @ '
+    return '\n'.join(line for line in stderr.splitlines() if marker in line)
+
+
+def _run_merged_analysis(
+    ffmpeg: str, filename: str, include_phase_check: bool, include_hires_check: bool
+) -> tuple[str, int]:
+    """One ffmpeg invocation, one decode, for every whole-file measurement
+    that doesn't need another measurement's result first: clipping/peak
+    stats (astats), spectral-cutoff/transcode detection (highpass +
+    volumedetect), true peak/LUFS (loudnorm), and — when applicable —
+    phase/mono-duplication (aphasemeter) and fake-hi-res spectral content
+    (a second highpass + volumedetect at a higher cutoff). `asplit` feeds
+    the same decoded audio into independent named filter chains; see
+    _filter_instance_output() for how each branch's output gets pulled
+    back out of the combined stderr. Replaces what used to be 3-5
+    separate ffmpeg process spawns (and file decodes) with exactly one.
+
+    `include_phase_check`/`include_hires_check` decide which optional
+    branches are even present in the graph — decided from ffprobe
+    metadata (channel count, sample rate) the caller already has before
+    this runs, not from anything this invocation measures itself. This
+    matters for phase checking specifically: feeding aphasemeter a truly
+    mono file doesn't error, but it does print a bare `mono_start: 0`
+    line, and _parse_phasemeter's check is a value-blind substring test
+    — so the branch must be structurally absent for mono files, not just
+    ignored after the fact, or a mono file would falsely score "mono
+    content duplicated into stereo". DR14 stays a separate, later pass
+    (see _measure_dr14): it's skipped outright once an upstream gate has
+    fired, a real perf saving that folding it into this always-run graph
+    would give up.
+
+    Returns (stderr, returncode) for the whole invocation — a non-zero
+    returncode means ffmpeg couldn't decode the file at all (every
+    branch depends on the same decode succeeding), same meaning the
+    first astats-only pass's returncode used to carry.
+    """
+    branches: list[tuple[str | None, str]] = [
+        ('main', 'astats@main'),
+        ('cutoff', f'highpass=f={SPECTRAL_CUTOFF_FREQUENCY_HZ},volumedetect@cutoff'),
+        (None, 'loudnorm=print_format=json'),
+    ]
+    if include_phase_check:
+        branches.append((None, 'aphasemeter=video=0:phasing=1'))
+    if include_hires_check:
+        branches.append(('hires', f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect@hires'))
+
+    split_labels = [f's{i}' for i in range(len(branches))]
+    graph = [f"[0:a]asplit={len(branches)}" + ''.join(f'[{label}]' for label in split_labels)]
+    out_labels = []
+    for i, (_tag, chain) in enumerate(branches):
+        out_label = f'o{i}'
+        graph.append(f'[{split_labels[i]}]{chain}[{out_label}]')
+        out_labels.append(out_label)
+
+    args = [ffmpeg, '-nostdin', '-hide_banner', '-i', filename, '-filter_complex', ';'.join(graph)]
+    for out_label in out_labels:
+        args += ['-map', f'[{out_label}]', '-f', 'null', '-']
+    proc = _run_subprocess(args)
+    return proc.stderr, proc.returncode
+
+
 def _parse_astats(stderr: str) -> tuple[float, float | None]:
     """Extract (flat_factor, peak_level_db) from astats' final "Overall" block.
 
@@ -397,14 +478,6 @@ def _parse_loudnorm(stderr: str) -> tuple[float | None, float | None]:
         return float(data['input_i']), float(data['input_tp'])
     except (ValueError, KeyError, TypeError):
         return None, None
-
-
-def _channel_count(astats_stderr: str) -> int:
-    """astats prints one 'DC offset' line per channel, plus one for the
-    combined "Overall" block — count() - 1 gives the channel count without
-    a second ffprobe call or subprocess.
-    """
-    return max(0, astats_stderr.count('DC offset') - 1)
 
 
 def _parse_phasemeter(stderr: str) -> tuple[bool, bool]:
@@ -462,37 +535,45 @@ class StreamInfo:
     codec_name: str | None
     profile: str | None
     bitrate_kbps: int | None
+    channels: int | None
 
 
 def _probe_stream_info(ffprobe: str, filename: str) -> StreamInfo:
     """Single ffprobe call for everything analyze_file needs from stream
-    metadata: sample rate (DR14 block sizing) and codec/profile/bitrate
-    (transparency scoring) — one call rather than one per use, since
-    ffprobe reads container/stream headers only, not the full audio, so
-    there's no reason to invoke it twice. Any failure (unparseable
-    output, no audio stream found) yields an all-None StreamInfo; every
-    caller already treats missing fields as "can't measure this",
-    consistent with the rest of the module's graceful-degradation style.
+    metadata: sample rate (DR14 block sizing), channel count (decides
+    upfront, before any ffmpeg filter pass runs, whether the merged
+    analysis graph's phase-check branch is worth including at all — see
+    _run_merged_analysis), and codec/profile/bitrate (transparency
+    scoring) — one call rather than one per use, since ffprobe reads
+    container/stream headers only, not the full audio, so there's no
+    reason to invoke it twice. Any failure (unparseable output, no audio
+    stream found) yields an all-None StreamInfo; every caller already
+    treats missing fields as "can't measure this", consistent with the
+    rest of the module's graceful-degradation style.
     """
     proc = _run_subprocess(
         [
             ffprobe, '-v', 'error', '-select_streams', 'a:0',
-            '-show_entries', 'stream=codec_name,profile,sample_rate,bit_rate:format=bit_rate',
+            '-show_entries', 'stream=codec_name,profile,sample_rate,channels,bit_rate:format=bit_rate',
             '-of', 'json', filename,
         ]
     )
     try:
         data = json.loads(proc.stdout)
     except (ValueError, TypeError):
-        return StreamInfo(None, None, None, None)
+        return StreamInfo(None, None, None, None, None)
     streams = data.get('streams') or []
     if not streams:
-        return StreamInfo(None, None, None, None)
+        return StreamInfo(None, None, None, None, None)
     stream = streams[0]
     try:
         sample_rate = int(stream['sample_rate'])
     except (KeyError, ValueError, TypeError):
         sample_rate = None
+    try:
+        channels = int(stream['channels'])
+    except (KeyError, ValueError, TypeError):
+        channels = None
     # Prefer the stream's own measured average bitrate — accurate for
     # VBR, since it reflects what this specific file actually used, not
     # a nominal target. Some containers (seen with short Opus test
@@ -510,6 +591,7 @@ def _probe_stream_info(ffprobe: str, filename: str) -> StreamInfo:
         codec_name=stream.get('codec_name'),
         profile=stream.get('profile'),
         bitrate_kbps=bitrate_kbps,
+        channels=channels,
     )
 
 
@@ -719,37 +801,44 @@ class AnalysisResult:
 
 def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResult:
     """Runs on a background thread — real decode + measurement work, not
-    instant. Separate ffmpeg passes for clarity/robustness; combining into
-    one filtergraph (asplit into astats/volumedetect/loudnorm/aphasemeter
-    branches) is a real future optimization once this is proven correct.
+    instant. Every whole-file measurement that doesn't depend on another
+    measurement's result first runs in one merged ffmpeg invocation (see
+    _run_merged_analysis) — one decode instead of the 3-5 separate passes
+    this used to spawn. DR14 and hum detection stay separate, later
+    passes: both are only worth running when no gate has already fired,
+    a real cost this function still avoids paying on a file that's
+    already "Bad" for an unrelated, definitively measured reason.
     """
     ffmpeg = find_ffmpeg(ffmpeg_path)
     ffprobe = _find_ffprobe(ffmpeg)
     check_ffmpeg_version(ffmpeg)
     stream_info = _probe_stream_info(ffprobe, filename)
 
-    astats_stderr, astats_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'astats')
-    if astats_returncode != 0:
-        # Every other measurement in this module depends on astats having
-        # actually decoded the file — a non-zero exit here means ffmpeg
-        # couldn't process it at all (corrupt, truncated, not really
-        # audio despite the extension, or it hit the timeout), so there's
-        # nothing trustworthy to report rather than silently defaulting
-        # to "no defects found".
+    # Both decided upfront from ffprobe metadata alone, before any ffmpeg
+    # filter pass runs, so the merged graph can include exactly the
+    # branches worth running rather than always paying for every branch
+    # or juggling a second invocation once "the file's actual channel
+    # count" becomes known partway through.
+    channels = stream_info.channels or 0
+    is_hires = stream_info.sample_rate is not None and stream_info.sample_rate > FAKE_HIRES_MIN_SAMPLE_RATE_HZ
+
+    merged_stderr, merged_returncode = _run_merged_analysis(
+        ffmpeg, filename, include_phase_check=channels >= 2, include_hires_check=is_hires
+    )
+    if merged_returncode != 0:
+        # Every measurement in this module depends on the same decode
+        # succeeding — a non-zero exit means ffmpeg couldn't process the
+        # file at all (corrupt, truncated, not really audio despite the
+        # extension, or it hit the timeout), so there's nothing
+        # trustworthy to report rather than silently defaulting to "no
+        # defects found".
         raise AnalysisError(
             f"ffmpeg couldn't decode {os.path.basename(filename)} as audio "
             "(corrupt, truncated, unsupported format, or a decode timeout) — not scored"
         )
-    flat_factor, peak_db = _parse_astats(astats_stderr)
-    channels = _channel_count(astats_stderr)
-
-    cutoff_stderr, _cutoff_returncode = _run_ffmpeg_filter(
-        ffmpeg, filename, f'highpass=f={SPECTRAL_CUTOFF_FREQUENCY_HZ},volumedetect'
-    )
-    above_cutoff_db = _parse_mean_volume(cutoff_stderr)
-
-    loudnorm_stderr, _loudnorm_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'loudnorm=print_format=json')
-    lufs, true_peak = _parse_loudnorm(loudnorm_stderr)
+    flat_factor, peak_db = _parse_astats(_filter_instance_output(merged_stderr, 'main'))
+    above_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'cutoff'))
+    lufs, true_peak = _parse_loudnorm(merged_stderr)
 
     issues: list[str] = []
     info: list[str] = []
@@ -798,13 +887,14 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
                 "(likely transcoded from a lossy source)"
             )
 
-    is_hires = stream_info.sample_rate is not None and stream_info.sample_rate > FAKE_HIRES_MIN_SAMPLE_RATE_HZ
     above_hires_cutoff_db: float | None = None
     if is_hires and has_signal:
-        hires_stderr, _hires_returncode = _run_ffmpeg_filter(
-            ffmpeg, filename, f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect'
-        )
-        above_hires_cutoff_db = _parse_mean_volume(hires_stderr)
+        # is_hires alone decided whether this branch was even in the
+        # merged graph; has_signal (only knowable after that same decode)
+        # decides whether its result is trustworthy to act on — a
+        # near-silent hi-res-rate file trivially has "no content above
+        # 24kHz" for the same reason it has no content anywhere.
+        above_hires_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'hires'))
         if above_hires_cutoff_db is not None and above_hires_cutoff_db < SPECTRAL_SILENCE_THRESHOLD_DB:
             # A real measured defect, not a guess: genuine content captured
             # at this sample rate would extend past the check frequency
@@ -818,11 +908,12 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
                 "ordinary-resolution source, not genuine hi-res audio"
             )
 
-    # Phase/channel-identity checks need two channels to compare — meaningless
-    # (and aphasemeter would just misbehave) on mono source material.
+    # Phase/channel-identity checks need two channels to compare —
+    # meaningless (and aphasemeter would just misbehave) on mono source
+    # material, which is exactly why the branch was left out of the
+    # merged graph entirely for those files rather than run and ignored.
     if channels >= 2:
-        phase_stderr, _phase_returncode = _run_ffmpeg_filter(ffmpeg, filename, 'aphasemeter=video=0:phasing=1')
-        is_mono_duplicated, is_out_of_phase = _parse_phasemeter(phase_stderr)
+        is_mono_duplicated, is_out_of_phase = _parse_phasemeter(merged_stderr)
         if is_out_of_phase:
             # A real, audible defect — will cancel out when summed to mono
             # (many phone/laptop/car speakers do this) — a genuine gate
