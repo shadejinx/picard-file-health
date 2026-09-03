@@ -77,6 +77,32 @@ FAKE_HIRES_CHECK_FREQUENCY_HZ = 24000
 # files are covered by the existing 17kHz spectral-cutoff check instead.
 FAKE_HIRES_MIN_SAMPLE_RATE_HZ = 48000
 
+# Effective-bandwidth sweep: a real, continuous cutoff-frequency estimate
+# (not the single-point binary check above), for the compare panel's
+# "which copy has more real high-frequency content" ranking. Probe points
+# span the cutoff range documented for real MP3 encoder profiles
+# (D'Alessandro & Shi, "MP3 Bit Rate Quality Detection through Frequency
+# Spectrum Analysis", ACM MM&Sec 2009: 128kbps≈16kHz, 192kbps≈17.5kHz,
+# 256kbps≈18.5-19kHz, 320kbps≈20kHz — a PSD classifier over this exact
+# band hit 97-99% accuracy on 2,512 real songs), finer near the middle of
+# that range where most real encodes land.
+BANDWIDTH_PROBE_FREQUENCIES_HZ = (
+    12000, 13000, 14000, 15000, 16000, 16500, 17000, 17500,
+    18000, 18500, 19000, 19500, 20000, 20500, 21000, 22000,
+)
+# Peak-relative, not absolute dBFS: the highest probe frequency whose
+# measured level stays within this many dB of the track's own spectral
+# peak counts as "real content" — a hard lowpass cliff drops far below
+# this regardless of how loud or quiet the track is overall, so no
+# separate near-silence guard is needed the way the absolute-threshold
+# check above requires. Value matches the open-source `lossless-checker`
+# tool's own published calibration (swept 45-75dB against a real library
+# plus known-answer 128k/320k round-trip MP3 fakes; every 128k fake
+# landed at 16.0-16.7kHz at this setting, genuine lossless clustered at
+# 21-22kHz) rather than re-derived from scratch — a real library beats
+# this project's own single synthetic sine/lowpass fixture.
+BANDWIDTH_PEAK_RELATIVE_DB = 65.0
+
 # Minimum astats "Flat factor" to count as real clipping, not incidental
 # same-value runs in loud content. Empirically calibrated: a clean quiet
 # file measured 0.0, genuinely loud (but not clipped) white noise measured
@@ -441,18 +467,25 @@ def _filter_instance_output(stderr: str, tag: str) -> str:
 
 
 def _run_merged_analysis(
-    ffmpeg: str, filename: str, include_phase_check: bool, include_hires_check: bool, phase_angle_deg: float
+    ffmpeg: str,
+    filename: str,
+    include_phase_check: bool,
+    include_hires_check: bool,
+    phase_angle_deg: float,
+    sample_rate: int | None,
 ) -> tuple[str, int]:
     """One ffmpeg invocation, one decode, for every whole-file measurement
     that doesn't need another measurement's result first: clipping/peak
     stats (astats), spectral-cutoff/transcode detection (highpass +
-    volumedetect), true peak/LUFS (loudnorm), and — when applicable —
-    phase/mono-duplication (aphasemeter) and fake-hi-res spectral content
-    (a second highpass + volumedetect at a higher cutoff). `asplit` feeds
-    the same decoded audio into independent named filter chains; see
-    _filter_instance_output() for how each branch's output gets pulled
-    back out of the combined stderr. Replaces what used to be 3-5
-    separate ffmpeg process spawns (and file decodes) with exactly one.
+    volumedetect), true peak/LUFS (loudnorm), the multi-point effective-
+    bandwidth sweep (see BANDWIDTH_PROBE_FREQUENCIES_HZ), and — when
+    applicable — phase/mono-duplication (aphasemeter) and fake-hi-res
+    spectral content (a second highpass + volumedetect at a higher
+    cutoff). `asplit` feeds the same decoded audio into independent named
+    filter chains; see _filter_instance_output() for how each branch's
+    output gets pulled back out of the combined stderr. Replaces what
+    used to be 3-5 separate ffmpeg process spawns (and file decodes) with
+    exactly one.
 
     `include_phase_check`/`include_hires_check` decide which optional
     branches are even present in the graph — decided from ffprobe
@@ -468,6 +501,16 @@ def _run_merged_analysis(
     fired, a real perf saving that folding it into this always-run graph
     would give up.
 
+    `sample_rate` bounds the bandwidth-sweep probe list to frequencies
+    genuinely below this file's own Nyquist — confirmed empirically that
+    ffmpeg accepts an out-of-range `highpass` cutoff without erroring,
+    logs "Invalid frequency and/or width!", and then silently passes the
+    branch's audio through unfiltered, which would misread as "full
+    bandwidth" for any file whose real sample rate is below 44.1kHz (a
+    real 32kHz-mono MP3 test fixture caught this live). A 500Hz margin
+    below Nyquist keeps the topmost probe out of a resampler's own
+    transition band.
+
     Returns (stderr, returncode) for the whole invocation — a non-zero
     returncode means ffmpeg couldn't decode the file at all (every
     branch depends on the same decode succeeding), same meaning the
@@ -482,6 +525,11 @@ def _run_merged_analysis(
         branches.append((None, f'aphasemeter=video=0:phasing=1:angle={phase_angle_deg}'))
     if include_hires_check:
         branches.append(('hires', f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect@hires'))
+    if sample_rate:
+        nyquist_margin = sample_rate / 2 - 500
+        for freq in BANDWIDTH_PROBE_FREQUENCIES_HZ:
+            if freq < nyquist_margin:
+                branches.append((f'bw{freq}', f'highpass=f={freq},volumedetect@bw{freq}'))
 
     split_labels = [f's{i}' for i in range(len(branches))]
     graph = [f"[0:a]asplit={len(branches)}" + ''.join(f'[{label}]' for label in split_labels)]
@@ -517,6 +565,35 @@ def _parse_astats(stderr: str) -> tuple[float, float | None]:
 def _parse_mean_volume(stderr: str) -> float | None:
     m = re.search(r'mean_volume:\s*([\-\d.]+)\s*dB', stderr)
     return float(m.group(1)) if m else None
+
+
+def _measure_bandwidth(merged_stderr: str, sample_rate: int | None, peak_db: float | None) -> float | None:
+    """Highest bandwidth-sweep probe frequency whose measured level is
+    still within BANDWIDTH_PEAK_RELATIVE_DB of the track's own peak —
+    the effective-bandwidth estimate. Peak-relative rather than
+    referenced against an absolute silence floor: a track's own peak
+    level already accounts for how loud or quiet it is overall, so this
+    needs no separate near-silence guard the way the absolute-threshold
+    single-point check does.
+
+    Returns None if there's nothing to measure (no sample rate, no peak)
+    or if even the lowest probe frequency is already below the
+    threshold — the file's real content doesn't reach the swept range at
+    all, i.e. an aggressive cutoff below BANDWIDTH_PROBE_FREQUENCIES_HZ's
+    own floor.
+    """
+    if not sample_rate or peak_db is None:
+        return None
+    threshold = peak_db - BANDWIDTH_PEAK_RELATIVE_DB
+    nyquist_margin = sample_rate / 2 - 500
+    highest: float | None = None
+    for freq in BANDWIDTH_PROBE_FREQUENCIES_HZ:
+        if freq >= nyquist_margin:
+            break
+        mean_volume = _parse_mean_volume(_filter_instance_output(merged_stderr, f'bw{freq}'))
+        if mean_volume is not None and mean_volume > threshold:
+            highest = float(freq)
+    return highest
 
 
 def _parse_loudnorm(stderr: str) -> tuple[float | None, float | None]:
@@ -715,16 +792,44 @@ def _measure_narrowband_rms(
     return -200.0 if raw == '-inf' else float(raw)
 
 
-def _detect_hum(ffmpeg: str, filename: str) -> str | None:
+def _measure_noise_floor(
+    ffmpeg: str, filename: str, quiet_interval: tuple[float, float] | None
+) -> float | None:
+    """Broadband RMS level (dB) in the track's own longest quiet passage —
+    an informational, cause-agnostic noise-floor estimate for the compare
+    panel's ranking, not a defect gate. A clean digital master's quiet
+    passages sit at a very low RMS (limited by dither/quantization); an
+    elevated noise floor there reflects real energy the mastering chain
+    left behind — mic self-noise, tape hiss, broadcast static, whatever
+    the cause — without needing to identify which. Same scoped-window
+    reasoning as hum detection (see _detect_hum): only the *quiet*
+    portion is measured, never the whole track, so genuinely loud modern
+    masters that never drop below HUM_SILENCE_THRESHOLD_DB simply have
+    nothing to report here rather than a misleading "noise floor" pulled
+    from a passage that was never actually quiet.
+    """
+    if quiet_interval is None:
+        return None
+    start, duration = quiet_interval
+    stderr, _returncode = _run_ffmpeg_filter(ffmpeg, filename, 'astats', start=start, duration=duration)
+    m = re.search(r'RMS level dB:\s*(-?[\d.]+|-inf)', stderr)
+    if not m:
+        return None
+    raw = m.group(1)
+    return -200.0 if raw == '-inf' else float(raw)
+
+
+def _detect_hum(ffmpeg: str, filename: str, quiet_interval: tuple[float, float] | None) -> str | None:
     """Informational only — never gates or affects the tier. Even scoped
     to a quiet passage, this can't be told apart with full certainty from
     a sustained musical drone/pedal note at exactly the same frequency
     that happens to ring into an otherwise-quiet moment — strong
     likelihood, not a definitive measurement the way clipping/cutoff/
     true-peak/fake-hi-res are (see HUM_* constants for the validation
-    that motivates the specific thresholds).
+    that motivates the specific thresholds). Takes the quiet interval as
+    a parameter (shared with _measure_noise_floor) rather than finding it
+    again — one silencedetect pass serves both.
     """
-    quiet_interval = _find_quiet_interval(ffmpeg, filename)
     if quiet_interval is None:
         return None
     start, duration = quiet_interval
@@ -848,6 +953,8 @@ class AnalysisResult:
     spectral_energy_above_hires_cutoff_db: float | None
     lame_lowpass_hz: int | None
     dr14: int | None
+    spectral_bandwidth_hz: float | None
+    noise_floor_db: float | None
 
 
 def analyze_file(
@@ -887,6 +994,7 @@ def analyze_file(
         include_phase_check=channels >= 2,
         include_hires_check=is_hires,
         phase_angle_deg=thresholds.phase_angle_deg,
+        sample_rate=stream_info.sample_rate,
     )
     if merged_returncode != 0:
         # Every measurement in this module depends on the same decode
@@ -902,6 +1010,10 @@ def analyze_file(
     flat_factor, peak_db = _parse_astats(_filter_instance_output(merged_stderr, 'main'))
     above_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'cutoff'))
     lufs, true_peak = _parse_loudnorm(merged_stderr)
+    # Informational only, for the compare panel's ranking — doesn't feed
+    # `issues`/tier (see BANDWIDTH_* constants for why this is a
+    # continuous, cause-agnostic estimate rather than a defect gate).
+    spectral_bandwidth_hz = _measure_bandwidth(merged_stderr, stream_info.sample_rate, peak_db)
 
     issues: list[str] = []
     info: list[str] = []
@@ -989,19 +1101,22 @@ def analyze_file(
             info.append("Left/right channels are identical (mono content in a stereo container)")
 
     dr14: int | None = None
+    noise_floor_db: float | None = None
     if not issues:
         # Only worth the extra ffprobe + windowed-astats pass when no gate
         # already forced "Bad" — a defective file's dynamic range doesn't
         # change its tier either way.
         dr14 = _measure_dr14(ffmpeg, filename, stream_info.sample_rate)
 
-        # Same reasoning: hum detection needs a silencedetect pass plus up
-        # to four more scoped ffmpeg passes, not worth it on a file
-        # already gated "Bad" for an unrelated, definitively measured
-        # reason.
-        hum_note = _detect_hum(ffmpeg, filename)
+        # Same reasoning: hum detection and the noise-floor estimate both
+        # need a silencedetect pass plus scoped ffmpeg passes, not worth
+        # it on a file already gated "Bad" for an unrelated, definitively
+        # measured reason. One silencedetect pass serves both checks.
+        quiet_interval = _find_quiet_interval(ffmpeg, filename)
+        hum_note = _detect_hum(ffmpeg, filename, quiet_interval)
         if hum_note is not None:
             info.append(hum_note)
+        noise_floor_db = _measure_noise_floor(ffmpeg, filename, quiet_interval)
 
     if issues:
         tier = "Bad"
@@ -1033,4 +1148,6 @@ def analyze_file(
         spectral_energy_above_hires_cutoff_db=above_hires_cutoff_db,
         lame_lowpass_hz=lame_lowpass_hz,
         dr14=dr14,
+        spectral_bandwidth_hz=spectral_bandwidth_hz,
+        noise_floor_db=noise_floor_db,
     )
