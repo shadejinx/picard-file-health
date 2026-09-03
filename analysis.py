@@ -41,6 +41,23 @@ SPECTRAL_CUTOFF_FREQUENCY_HZ = 17000
 # above 17kHz before this guard was added.
 MIN_PEAK_DB_FOR_SPECTRAL_CHECK = -40.0
 
+# Minimum astats "Flat factor" to count as real clipping, not incidental
+# same-value runs in loud content. Empirically calibrated: a clean quiet
+# file measured 0.0, genuinely loud (but not clipped) white noise measured
+# 0.0094, but even the mildest real clipping tested (samples just barely
+# touching full scale, 2% overdrive) jumped to 16.06, up to 31.88 for hard
+# clipping. 1.0 sits with ~100x margin below the noise case and ~16x
+# margin below the mildest real-clipping case.
+MIN_FLAT_FACTOR_FOR_CLIPPING = 1.0
+
+# True Peak (dBTP) at or above this indicates inter-sample reconstruction
+# overshoot — real digital-to-analog playback can clip even when no single
+# *sample* is at full scale, which Flat factor alone can't see. Confirmed
+# on a real file: white noise measured Flat factor 0.0094 (below the
+# clipping threshold above, correctly not "clipping") but True Peak
+# +3.71dBTP — a genuine, distinct defect Flat factor missed entirely.
+TRUE_PEAK_THRESHOLD_DBTP = 0.0
+
 # LUFS integrated-loudness thresholds for the coarse gradient (see module
 # docstring for the real-world reference points these approximate).
 LUFS_POOR_THRESHOLD = -8.0
@@ -123,15 +140,16 @@ def _parse_mean_volume(stderr: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def _parse_loudnorm_lufs(stderr: str) -> float | None:
+def _parse_loudnorm(stderr: str) -> tuple[float | None, float | None]:
+    """Returns (integrated_lufs, true_peak_dbtp)."""
     m = re.search(r'\{[^{}]*"input_i"[^{}]*\}', stderr, re.DOTALL)
     if not m:
-        return None
+        return None, None
     try:
         data = json.loads(m.group(0))
-        return float(data['input_i'])
+        return float(data['input_i']), float(data['input_tp'])
     except (ValueError, KeyError, TypeError):
-        return None
+        return None, None
 
 
 @dataclass
@@ -140,6 +158,7 @@ class AnalysisResult:
     issues: list[str]
     content_hash: str
     lufs: float | None
+    true_peak_dbtp: float | None
     clipping_flat_factor: float
     spectral_energy_above_cutoff_db: float | None
 
@@ -161,12 +180,20 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
     above_cutoff_db = _parse_mean_volume(cutoff_stderr)
 
     loudnorm_stderr = _run_ffmpeg_filter(ffmpeg, filename, 'loudnorm=print_format=json')
-    lufs = _parse_loudnorm_lufs(loudnorm_stderr)
+    lufs, true_peak = _parse_loudnorm(loudnorm_stderr)
 
     issues: list[str] = []
-    has_clipping = flat_factor > 0
+    has_clipping = flat_factor > MIN_FLAT_FACTOR_FOR_CLIPPING
     if has_clipping:
         issues.append("Clipping detected")
+
+    has_true_peak_overs = true_peak is not None and true_peak >= TRUE_PEAK_THRESHOLD_DBTP
+    if has_true_peak_overs and not has_clipping:
+        # Only report separately when Flat factor didn't already catch a
+        # defect — both signals pointing at "this file clips" is redundant
+        # to say twice, but true-peak-only is a genuinely distinct finding
+        # (inter-sample overshoot with no sample actually at full scale).
+        issues.append(f"Inter-sample peaks exceed full scale (True Peak {true_peak:+.1f}dBTP)")
 
     has_signal = peak_db is not None and peak_db > MIN_PEAK_DB_FOR_SPECTRAL_CHECK
     has_cutoff = (
@@ -199,6 +226,7 @@ def analyze_file(filename: str, ffmpeg_path: str | None = None) -> AnalysisResul
         issues=issues,
         content_hash=content_hash(filename),
         lufs=lufs,
+        true_peak_dbtp=true_peak,
         clipping_flat_factor=flat_factor,
         spectral_energy_above_cutoff_db=above_cutoff_db,
     )
