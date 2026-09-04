@@ -1082,8 +1082,9 @@ class _MockComparisonMatrix(QtWidgets.QDialog):
             full_names.append(check_name)
             headers.append(_MOCK_CHECK_TAGS[check_name])
         for label, weight in _MOCK_RANK_COLUMNS:
-            full_names.append(f"{label} (weight {weight})" if weight else f"{label} (not used — weight 0)")
-            headers.append(f"{_MOCK_RANK_TAGS[label]} ({weight})")
+            weight_note = f"Comparison Priority weight: {weight}/10" + (" (not currently used)" if not weight else "")
+            full_names.append(f"{label} — {weight_note}")
+            headers.append(_MOCK_RANK_TAGS[label])
 
         self.tree = QtWidgets.QTreeWidget(self)
         self.tree.setHeaderLabels(headers)
