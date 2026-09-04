@@ -96,6 +96,7 @@ class _SensitivitySlider(QtWidgets.QFrame):
         default_index: int,
         fmt: str,
         parent: QtWidgets.QWidget | None = None,
+        tag: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._steps = steps
@@ -112,8 +113,16 @@ class _SensitivitySlider(QtWidgets.QFrame):
         bold = title_label.font()
         bold.setBold(True)
         title_label.setFont(bold)
-        self.value_label = QtWidgets.QLabel(self)
         header.addWidget(title_label)
+        if tag:
+            # A separate, independently-sized label rather than baking the
+            # tag into the title string — a single long concatenated string
+            # forces the whole header to fight the layout for width and can
+            # wrap or get silently clipped; two small widgets don't.
+            tag_label = QtWidgets.QLabel(f"({tag})", self)
+            tag_label.setStyleSheet("color: palette(mid);")
+            header.addWidget(tag_label)
+        self.value_label = QtWidgets.QLabel(self)
         header.addStretch(1)
         header.addWidget(self.value_label)
         layout.addLayout(header)
@@ -170,7 +179,11 @@ class _WeightSlider(QtWidgets.QFrame):
     """
 
     def __init__(
-        self, title: str, bands: tuple[tuple[int, str], ...], parent: QtWidgets.QWidget | None = None
+        self,
+        title: str,
+        bands: tuple[tuple[int, str], ...],
+        parent: QtWidgets.QWidget | None = None,
+        tag: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._bands = bands
@@ -184,8 +197,12 @@ class _WeightSlider(QtWidgets.QFrame):
         bold = title_label.font()
         bold.setBold(True)
         title_label.setFont(bold)
-        self.value_label = QtWidgets.QLabel(self)
         header.addWidget(title_label)
+        if tag:
+            tag_label = QtWidgets.QLabel(f"({tag})", self)
+            tag_label.setStyleSheet("color: palette(mid);")
+            header.addWidget(tag_label)
+        self.value_label = QtWidgets.QLabel(self)
         header.addStretch(1)
         header.addWidget(self.value_label)
         layout.addLayout(header)
@@ -531,31 +548,31 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addWidget(sensitivity_intro)
 
         self.clip_slider = _SensitivitySlider(
-            "Clipping (CLP)", _CLIP_STEPS, _CLIP_DEFAULT_INDEX, fmt="{:g}", parent=self,
+            "Clipping", _CLIP_STEPS, _CLIP_DEFAULT_INDEX, fmt="{:g}", parent=self, tag="CLP",
         )
         sensitivity_layout.addWidget(self.clip_slider)
         sensitivity_layout.addSpacing(8)
 
         self.true_peak_slider = _SensitivitySlider(
-            "True Peak (TPK)", _TRUE_PEAK_STEPS, _TRUE_PEAK_DEFAULT_INDEX, fmt="{:+.1f} dBTP", parent=self,
+            "True Peak", _TRUE_PEAK_STEPS, _TRUE_PEAK_DEFAULT_INDEX, fmt="{:+.1f} dBTP", parent=self, tag="TPK",
         )
         sensitivity_layout.addWidget(self.true_peak_slider)
         sensitivity_layout.addSpacing(8)
 
         self.spectral_silence_slider = _SensitivitySlider(
-            "Missing Treble (TRB)", _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self,
+            "Missing Treble", _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self, tag="TRB",
         )
         sensitivity_layout.addWidget(self.spectral_silence_slider)
         sensitivity_layout.addSpacing(8)
 
         self.phase_angle_slider = _SensitivitySlider(
-            "Out-of-Phase Channels (PHS)", _PHASE_STEPS, _PHASE_DEFAULT_INDEX, fmt="{:.0f}\u00b0", parent=self,
+            "Out-of-Phase Channels", _PHASE_STEPS, _PHASE_DEFAULT_INDEX, fmt="{:.0f}\u00b0", parent=self, tag="PHS",
         )
         sensitivity_layout.addWidget(self.phase_angle_slider)
         sensitivity_layout.addSpacing(8)
 
         self.dr14_shift_slider = _SensitivitySlider(
-            "Compression Tolerance (DYN)", _DR14_SHIFT_STEPS, _DR14_SHIFT_DEFAULT_INDEX, fmt="{:+.0f} DR", parent=self,
+            "Compression Tolerance", _DR14_SHIFT_STEPS, _DR14_SHIFT_DEFAULT_INDEX, fmt="{:+.0f} DR", parent=self, tag="DYN",
         )
         sensitivity_layout.addWidget(self.dr14_shift_slider)
 
@@ -581,19 +598,19 @@ class HealthOptionsPage(OptionsPage):
         priority_intro.setWordWrap(True)
         priority_layout.addWidget(priority_intro)
 
-        self.rank_bandwidth_slider = _WeightSlider("Bandwidth (BND)", _BANDWIDTH_WEIGHT_BANDS, parent=self)
+        self.rank_bandwidth_slider = _WeightSlider("Bandwidth", _BANDWIDTH_WEIGHT_BANDS, parent=self, tag="BND")
         priority_layout.addWidget(self.rank_bandwidth_slider)
         priority_layout.addSpacing(8)
 
-        self.rank_noise_floor_slider = _WeightSlider("Noise Floor (NSF)", _NOISE_FLOOR_WEIGHT_BANDS, parent=self)
+        self.rank_noise_floor_slider = _WeightSlider("Noise Floor", _NOISE_FLOOR_WEIGHT_BANDS, parent=self, tag="NSF")
         priority_layout.addWidget(self.rank_noise_floor_slider)
         priority_layout.addSpacing(8)
 
-        self.rank_dr14_slider = _WeightSlider("Dynamic Range (DYN)", _DR14_WEIGHT_BANDS, parent=self)
+        self.rank_dr14_slider = _WeightSlider("Dynamic Range", _DR14_WEIGHT_BANDS, parent=self, tag="DYN")
         priority_layout.addWidget(self.rank_dr14_slider)
         priority_layout.addSpacing(8)
 
-        self.rank_coherence_slider = _WeightSlider("Stereo Coherence (COH)", _COHERENCE_WEIGHT_BANDS, parent=self)
+        self.rank_coherence_slider = _WeightSlider("Stereo Coherence", _COHERENCE_WEIGHT_BANDS, parent=self, tag="COH")
         priority_layout.addWidget(self.rank_coherence_slider)
 
         priority_reset_row = QtWidgets.QHBoxLayout()
