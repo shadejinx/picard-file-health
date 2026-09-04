@@ -14,6 +14,7 @@ real vs. still-coarse-proxy vs. documented future work.
 
 import os
 import tempfile
+from collections.abc import Callable
 
 from PyQt6 import (
     QtCore,
@@ -419,6 +420,18 @@ def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thres
         'noise_floor_db': result.noise_floor_db,
         'dr14': result.dr14,
         'stereo_coherence': result.stereo_coherence,
+        'true_peak_dbtp': result.true_peak_dbtp,
+        'clipping_flat_factor': result.clipping_flat_factor,
+        'spectral_cutoff_db': result.spectral_energy_above_cutoff_db,
+        'hires_cutoff_db': result.spectral_energy_above_hires_cutoff_db,
+        'is_out_of_phase': result.is_out_of_phase,
+        'is_mono_duplicated': result.is_mono_duplicated,
+        'codec_name': result.stream_info.codec_name,
+        'profile': result.stream_info.profile,
+        'bitrate_kbps': result.stream_info.bitrate_kbps,
+        'sample_rate': result.stream_info.sample_rate,
+        'channels': result.stream_info.channels,
+        'peak_db': result.peak_db,
     }
 
 
@@ -438,6 +451,25 @@ def _decode_metric(raw: str) -> float | None:
         return float(raw)
     except ValueError:
         return None
+
+
+def _encode_bool(value: bool | None) -> str:
+    """Tri-state, same round-trip convention as _encode_metric: '' means
+    not applicable/not measured (e.g. a mono file has no phase check to
+    report), distinct from a real True/False result.
+    """
+    if value is None:
+        return ''
+    return '1' if value else '0'
+
+
+def _decode_bool(raw: str) -> bool | None:
+    if raw == '1':
+        return True
+    if raw == '0':
+        return False
+    return None
+
 
 
 def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
@@ -472,6 +504,18 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
             file.metadata['~health_noise_floor_db'] = _encode_metric(result['noise_floor_db'])
             file.metadata['~health_dr14'] = _encode_metric(result['dr14'])
             file.metadata['~health_stereo_coherence'] = _encode_metric(result['stereo_coherence'])
+            file.metadata['~health_true_peak_dbtp'] = _encode_metric(result['true_peak_dbtp'])
+            file.metadata['~health_clip_flat_factor'] = _encode_metric(result['clipping_flat_factor'])
+            file.metadata['~health_spectral_cutoff_db'] = _encode_metric(result['spectral_cutoff_db'])
+            file.metadata['~health_hires_cutoff_db'] = _encode_metric(result['hires_cutoff_db'])
+            file.metadata['~health_is_out_of_phase'] = _encode_bool(result['is_out_of_phase'])
+            file.metadata['~health_is_mono_duplicated'] = _encode_bool(result['is_mono_duplicated'])
+            file.metadata['~health_codec_name'] = result['codec_name'] or ''
+            file.metadata['~health_profile'] = result['profile'] or ''
+            file.metadata['~health_bitrate_kbps'] = _encode_metric(result['bitrate_kbps'])
+            file.metadata['~health_sample_rate'] = _encode_metric(result['sample_rate'])
+            file.metadata['~health_channels'] = _encode_metric(result['channels'])
+            file.metadata['~health_peak_db'] = _encode_metric(result['peak_db'])
     file.clear_pending()
     file.update()
 
@@ -856,6 +900,197 @@ def _rank_explanation(files: list[File], rank_weights: dict[str, int]) -> str:
     return "Ranked ahead of tied files by:\n" + "\n".join(lines)
 
 
+# --- Comparison-matrix stoplight logic ---
+
+_STATE_COLORS: dict[str, tuple[QtGui.QColor, QtGui.QColor]] = {
+    'pass': (QtGui.QColor('#c8e6c9'), QtGui.QColor('#1b5e20')),
+    'amber': (QtGui.QColor('#ffe0b2'), QtGui.QColor('#8d5500')),
+    'fail': (QtGui.QColor('#ffcdd2'), QtGui.QColor('#b71c1c')),
+    'na': (QtGui.QColor('#eeeeee'), QtGui.QColor('#9e9e9e')),
+}
+_STATE_EMOJI: dict[str, str] = {'pass': '✅', 'amber': '⚠️', 'fail': '❌', 'na': '➖'}
+
+# check label -> 3-4 letter tag matching its Options-page slider (see
+# HealthOptionsPage). Fake Hi-Res has no dedicated slider of its own — it
+# shares Missing Treble's spectral-silence threshold.
+_CHECK_TAGS: dict[str, str] = {
+    'Clipping': 'CLP',
+    'True Peak': 'TPK',
+    'Missing Treble': 'TRB',
+    'Out-of-Phase': 'PHS',
+    'Fake Hi-Res': 'HRS',
+}
+_CHECK_COLUMNS = list(_CHECK_TAGS)
+
+# rank axis label -> (metadata key, plugin_config weight key, tag,
+# higher-value-is-better) — same four axes as _RANK_AXES/_composite_winner,
+# with display info added for the matrix columns.
+_RANK_COLUMN_INFO: dict[str, tuple[str, str, str, bool]] = {
+    'Dynamic Range': ('~health_dr14', 'rank_weight_dr14', 'DYN', True),
+    'Bandwidth': ('~health_bandwidth_hz', 'rank_weight_bandwidth', 'BND', True),
+    'Noise Floor': ('~health_noise_floor_db', 'rank_weight_noise_floor', 'NSF', False),
+    'Stereo Coherence': ('~health_stereo_coherence', 'rank_weight_coherence', 'COH', True),
+}
+_RANK_COLUMNS = list(_RANK_COLUMN_INFO)
+
+_LOSSLESS_CODECS = {'flac', 'alac', 'wavpack', 'tta', 'ape'}
+
+
+def _is_lossless_codec(codec: str) -> bool:
+    return codec in _LOSSLESS_CODECS or codec.startswith('pcm_')
+
+
+def _next_stricter_step(steps: list[tuple[float, str]], current: float) -> float | None:
+    """The step past `current` in a slider's own lenient->strict ordering —
+    "one notch stricter than wherever the slider sits right now."
+    """
+    values = [v for v, _ in steps]
+    idx = min(range(len(values)), key=lambda i: abs(values[i] - current))
+    return values[idx + 1] if idx + 1 < len(values) else None
+
+
+def _gate_cell(
+    value: float | None,
+    applies: bool,
+    current: float,
+    steps: list[tuple[float, str]],
+    fails: Callable[[float, float], bool],
+    unit: str,
+    na_reason: str,
+) -> tuple[str, str]:
+    """One gate check's cell: (state, tooltip). Amber means "would fail if
+    the matching Options-page slider moved one notch stricter" — reuses
+    the slider's own calibrated steps rather than a new invented margin,
+    so the amber band moves live with the slider instead of sitting at a
+    fixed offset unrelated to what the user actually configured.
+    """
+    if not applies or value is None:
+        return 'na', na_reason
+    if fails(value, current):
+        return 'fail', f"{value:.1f}{unit} — already past the current threshold ({current:.1f}{unit})."
+    next_stricter = _next_stricter_step(steps, current)
+    if next_stricter is not None and fails(value, next_stricter):
+        return 'amber', (
+            f"{value:.1f}{unit} — clear of the current threshold ({current:.1f}{unit}), but would fail "
+            f"one slider notch stricter ({next_stricter:.1f}{unit})."
+        )
+    return 'pass', f"{value:.1f}{unit} — comfortably clear of the threshold ({current:.1f}{unit})."
+
+
+def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple[str, str]]:
+    """Every gate-check column's (state, tooltip) for one file, computed
+    live from its stored raw measurements against the *current* slider
+    settings — not the tier baked in at last scan time, which only
+    updates on rescan since which gates fired decides whether DR14 was
+    even measured (see CompareResultsPanel's docstring for that split).
+    """
+    channels = _read_metric(file, '~health_channels')
+    peak_db = _read_metric(file, '~health_peak_db')
+    sample_rate = _read_metric(file, '~health_sample_rate')
+    has_signal = peak_db is not None and peak_db > analysis.MIN_PEAK_DB_FOR_SPECTRAL_CHECK
+    is_hires = sample_rate is not None and sample_rate > analysis.FAKE_HIRES_MIN_SAMPLE_RATE_HZ
+
+    cells: dict[str, tuple[str, str]] = {
+        'Clipping': _gate_cell(
+            _read_metric(file, '~health_clip_flat_factor'), True,
+            thresholds.clip_flat_factor, _CLIP_STEPS, lambda v, t: v > t, "", "Not yet measured.",
+        ),
+        'True Peak': _gate_cell(
+            _read_metric(file, '~health_true_peak_dbtp'), True,
+            thresholds.true_peak_dbtp, _TRUE_PEAK_STEPS, lambda v, t: v >= t, "dBTP", "Not yet measured.",
+        ),
+        'Missing Treble': _gate_cell(
+            _read_metric(file, '~health_spectral_cutoff_db'), has_signal,
+            thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
+            "Near-silent file — not enough signal to measure high-frequency content.",
+        ),
+        'Fake Hi-Res': _gate_cell(
+            _read_metric(file, '~health_hires_cutoff_db'), is_hires and has_signal,
+            thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
+            "Not a hi-res-rate file — check doesn't apply." if not is_hires else
+            "Near-silent file — not enough signal to measure.",
+        ),
+    }
+    is_out_of_phase = _decode_bool(file.metadata['~health_is_out_of_phase'])
+    if channels is not None and channels < 2:
+        cells['Out-of-Phase'] = ('na', "Mono file — no second channel to compare.")
+    elif is_out_of_phase is None:
+        cells['Out-of-Phase'] = ('na', "Not yet measured.")
+    elif is_out_of_phase:
+        cells['Out-of-Phase'] = (
+            'fail', "Left and right channels cancel out — will sound hollow or vanish entirely on mono speakers."
+        )
+    else:
+        cells['Out-of-Phase'] = ('pass', "Channels are correlated normally.")
+    return cells
+
+
+def _rank_cells(group: list[File], rank_weights: dict[str, int]) -> dict[File, dict[str, tuple[str, str]]]:
+    """Every ranking-axis column's (state, tooltip) for every file in one
+    compare group — relative *within this group* (best measured value
+    green, worst red, the rest amber), since these axes have no absolute
+    pass/fail threshold of their own, only a tie-break weight. A weight
+    of 0 dims the whole column to "na" regardless of the measured values
+    — it isn't currently used to break ties.
+    """
+    result: dict[File, dict[str, tuple[str, str]]] = {f: {} for f in group}
+    for label, (metadata_key, weight_key, _tag, higher_is_better) in _RANK_COLUMN_INFO.items():
+        weight = rank_weights.get(weight_key, 0)
+        values = {f: _read_metric(f, metadata_key) for f in group}
+        measured = {f: v for f, v in values.items() if v is not None}
+        best = max(measured.values()) if higher_is_better else min(measured.values()) if measured else None
+        worst = min(measured.values()) if higher_is_better else max(measured.values()) if measured else None
+        for f in group:
+            v = values[f]
+            if weight <= 0:
+                result[f][label] = ('na', "Weight is 0 — this axis is not currently used to break ties.")
+            elif v is None:
+                result[f][label] = ('na', "Not measured (skipped this scan, or not yet scanned).")
+            elif len(measured) < 2 or best == worst:
+                result[f][label] = ('pass', f"{v:.1f} — nothing else in the group to compare against.")
+            elif v == best:
+                result[f][label] = ('pass', f"{v:.1f} — best in the group (weight {weight}/10).")
+            elif v == worst:
+                result[f][label] = ('fail', f"{v:.1f} — worst in the group (weight {weight}/10).")
+            else:
+                result[f][label] = ('amber', f"{v:.1f} — middle of the group (weight {weight}/10).")
+    return result
+
+
+def _format_cell(file: File) -> tuple[str, str]:
+    """Merges codec/bitrate/sample-rate/channels into the single reading
+    people are already used to seeing together, e.g. "MP3 320 kbps · 44.1
+    kHz · Stereo" or "FLAC (Lossless) · 96 kHz · Stereo".
+    """
+    codec = file.metadata['~health_codec_name'] or ''
+    profile = file.metadata['~health_profile'] or ''
+    bitrate = _read_metric(file, '~health_bitrate_kbps')
+    sample_rate = _read_metric(file, '~health_sample_rate')
+    channels = _read_metric(file, '~health_channels')
+    if not codec:
+        return "Not yet scanned", "No format information yet — scan this file first."
+
+    codec_display = codec.upper()
+    if 'he-aac' in profile.lower():
+        codec_display += " (HE-AAC)"
+    lossless = _is_lossless_codec(codec)
+    if lossless:
+        codec_part = f"{codec_display} (Lossless)"
+    elif bitrate is not None:
+        codec_part = f"{codec_display} {int(bitrate)} kbps"
+    else:
+        codec_part = codec_display
+    sr_display = f"{sample_rate / 1000:.1f} kHz" if sample_rate else "?"
+    ch_display = {1: "Mono", 2: "Stereo"}.get(
+        int(channels) if channels is not None else -1,
+        f"{int(channels)}ch" if channels is not None else "?",
+    )
+    text = f"{codec_part} · {sr_display} · {ch_display}"
+    tooltip_bitrate = "Lossless" if lossless else (f"{int(bitrate)} kbps" if bitrate is not None else "unknown")
+    tooltip = f"Codec: {codec_display}\nBitrate: {tooltip_bitrate}\nSample rate: {sr_display}\nChannels: {ch_display}"
+    return text, tooltip
+
+
 _FILE_ROLE = QtCore.Qt.ItemDataRole.UserRole
 
 
@@ -886,262 +1121,6 @@ class SpectrogramDialog(QtWidgets.QDialog):
         self.resize(min(pixmap.width() + 40, 1100), min(pixmap.height() + 60, 800))
 
 
-# --- MOCKUP: comparison-matrix redesign, dummy data only, no real wiring. ---
-# Temporary, for visual review of "one column per check, stoplight per cell,
-# explanation in the tooltip, ranking-axis columns dimmed at weight 0" before
-# building it against real AnalysisResult/metadata plumbing. Delete once the
-# design is confirmed or revised.
-
-_MOCK_STATE_COLORS: dict[str, tuple[QtGui.QColor, QtGui.QColor]] = {
-    'pass': (QtGui.QColor('#c8e6c9'), QtGui.QColor('#1b5e20')),
-    'amber': (QtGui.QColor('#ffe0b2'), QtGui.QColor('#8d5500')),
-    'fail': (QtGui.QColor('#ffcdd2'), QtGui.QColor('#b71c1c')),
-    'na': (QtGui.QColor('#eeeeee'), QtGui.QColor('#9e9e9e')),
-}
-_MOCK_STATE_EMOJI: dict[str, str] = {'pass': '✅', 'amber': '⚠️', 'fail': '❌', 'na': '➖'}
-
-# check name -> (3-4 letter tag matching the Options-page slider that governs
-# it, e.g. "Clipping (CLP)"). Fake Hi-Res has no dedicated slider of its own
-# (it shares Missing Treble's spectral-silence threshold) so it gets a tag
-# without a matching slider suffix.
-_MOCK_CHECK_TAGS: dict[str, str] = {
-    'Clipping': 'CLP',
-    'True Peak': 'TPK',
-    'Missing Treble': 'TRB',
-    'Out-of-Phase': 'PHS',
-    'Fake Hi-Res': 'HRS',
-}
-_MOCK_CHECK_COLUMNS = list(_MOCK_CHECK_TAGS)
-
-# rank axis -> 3-4 letter tag matching its Comparison Priority slider.
-_MOCK_RANK_TAGS: dict[str, str] = {
-    'Dynamic Range': 'DYN',
-    'Bandwidth': 'BND',
-    'Noise Floor': 'NSF',
-    'Stereo Coherence': 'COH',
-}
-# (label, current rank weight) — weight 0 demonstrates a column the user has
-# turned off in Comparison Priority.
-_MOCK_RANK_COLUMNS: list[tuple[str, int]] = [
-    ('Dynamic Range', 5),
-    ('Bandwidth', 7),
-    ('Noise Floor', 5),
-    ('Stereo Coherence', 0),
-]
-
-
-def _mock_format_text(meta: tuple[str, str, str, str]) -> str:
-    """Merges codec/bitrate/sample-rate/channels into the single reading
-    people are already used to seeing together, e.g. "MP3 320 kbps · 44.1
-    kHz · Stereo" or "FLAC (Lossless) · 96 kHz · Stereo".
-    """
-    codec, bitrate, sample_rate, channels = meta
-    codec_part = f"{codec} {bitrate}" if bitrate and bitrate != '—' else codec
-    return f"{codec_part} · {sample_rate} · {channels}"
-
-
-def _mock_format_tooltip(meta: tuple[str, str, str, str]) -> str:
-    codec, bitrate, sample_rate, channels = meta
-    return f"Codec: {codec}\nBitrate: {bitrate}\nSample rate: {sample_rate}\nChannels: {channels}"
-
-
-_MOCK_GROUPS: list[tuple[str, list[dict[str, object]]]] = [
-    (
-        "Miles Davis — So What",
-        [
-            {
-                'file': 'So What.flac', 'tier': 'Excellent',
-                'meta': ('FLAC (Lossless)', '—', '44.1 kHz', 'Stereo'),
-                'checks': {
-                    'Clipping': ('pass', "Flat factor 1.02 — comfortably below the clipping threshold (1.50)."),
-                    'True Peak': ('pass', "Peak -2.4 dBTP — well clear of the +0.3 dBTP threshold."),
-                    'Missing Treble': ('pass', "-14.1 dB above 17kHz — real high-frequency content present."),
-                    'Out-of-Phase': ('pass', "Channels are correlated normally."),
-                    'Fake Hi-Res': ('na', "Declared sample rate (44.1kHz) isn't a hi-res rate — check doesn't apply."),
-                },
-                'ranks': {
-                    'Dynamic Range': ('DR14', 'pass', "Highest in group — full 5 rank points at weight 5."),
-                    'Bandwidth': ('21.8 kHz', 'pass', "Highest in group — full 7 rank points at weight 7."),
-                    'Noise Floor': ('-71 dB', 'pass', "Quietest in group — full 5 rank points at weight 5."),
-                    'Stereo Coherence': ('0.94', 'na', "Weight is 0 — not currently used to break ties."),
-                },
-            },
-            {
-                'file': 'So What.mp3 (320kbps)', 'tier': 'Good',
-                'meta': ('MP3', '320 kbps', '44.1 kHz', 'Stereo'),
-                'checks': {
-                    'Clipping': ('pass', "Flat factor 1.08 — below threshold."),
-                    'True Peak': ('amber', "Peak -0.1 dBTP — close to the +0.3 dBTP threshold; a louder remaster could tip this over."),
-                    'Missing Treble': ('amber', "-58 dB above 17kHz — near the -60dB silence threshold; a stricter Missing Treble setting would flag this."),
-                    'Out-of-Phase': ('pass', "Channels are correlated normally."),
-                    'Fake Hi-Res': ('na', "Not a hi-res-rate file — check doesn't apply."),
-                },
-                'ranks': {
-                    'Dynamic Range': ('DR10', 'amber', "Middle of group — partial rank points at weight 5."),
-                    'Bandwidth': ('18.9 kHz', 'amber', "Middle of group — partial rank points at weight 7."),
-                    'Noise Floor': ('-64 dB', 'amber', "Middle of group — partial rank points at weight 5."),
-                    'Stereo Coherence': ('0.90', 'na', "Weight is 0 — not currently used to break ties."),
-                },
-            },
-            {
-                'file': 'So What.mp3 (128kbps)', 'tier': 'Bad',
-                'meta': ('MP3', '128 kbps', '44.1 kHz', 'Stereo'),
-                'checks': {
-                    'Clipping': ('fail', "Flat factor 2.31 — exceeds the 1.50 clipping threshold. Volume peaks go past full scale between samples."),
-                    'True Peak': ('fail', "Peak +1.2 dBTP — exceeds the +0.3 dBTP threshold."),
-                    'Missing Treble': ('fail', "-91 dB above 17kHz — no real content above the cutoff. Likely transcoded from a lossy source."),
-                    'Out-of-Phase': ('pass', "Channels are correlated normally."),
-                    'Fake Hi-Res': ('na', "Not a hi-res-rate file — check doesn't apply."),
-                },
-                'ranks': {
-                    'Dynamic Range': ('—', 'na', "Skipped — file already gated \"Bad\" by another check."),
-                    'Bandwidth': ('12.0 kHz', 'fail', "Lowest in group — no rank points at weight 7."),
-                    'Noise Floor': ('-52 dB', 'fail', "Noisiest in group — no rank points at weight 5."),
-                    'Stereo Coherence': ('0.91', 'na', "Weight is 0 — not currently used to break ties."),
-                },
-            },
-        ],
-    ),
-    (
-        "Radiohead — Everything In Its Right Place",
-        [
-            {
-                'file': 'Everything.flac (96kHz master)', 'tier': 'Excellent',
-                'meta': ('FLAC (Lossless)', '—', '96 kHz', 'Stereo'),
-                'checks': {
-                    'Clipping': ('pass', "Flat factor 1.01 — below threshold."),
-                    'True Peak': ('pass', "Peak -3.8 dBTP — well clear."),
-                    'Missing Treble': ('pass', "Real content well above 17kHz."),
-                    'Out-of-Phase': ('pass', "Channels are correlated normally."),
-                    'Fake Hi-Res': ('pass', "Real spectral content confirmed above 24kHz — genuine hi-res, not upsampled."),
-                },
-                'ranks': {
-                    'Dynamic Range': ('DR12', 'pass', "Highest in group."),
-                    'Bandwidth': ('34.2 kHz', 'pass', "Highest in group."),
-                    'Noise Floor': ('-69 dB', 'pass', "Quietest in group."),
-                    'Stereo Coherence': ('0.88', 'na', "Weight is 0 — not currently used to break ties."),
-                },
-            },
-            {
-                'file': 'Everything.flac (upsampled 96kHz)', 'tier': 'Bad',
-                'meta': ('FLAC (Lossless container)', '—', '96 kHz', 'Stereo'),
-                'checks': {
-                    'Clipping': ('pass', "Flat factor 1.04 — below threshold."),
-                    'True Peak': ('pass', "Peak -4.1 dBTP — well clear."),
-                    'Missing Treble': ('pass', "Content present up to 17kHz."),
-                    'Out-of-Phase': ('pass', "Channels are correlated normally."),
-                    'Fake Hi-Res': ('fail', "No real content above 24kHz despite a 96000Hz sample rate — likely upsampled from an ordinary-resolution source, not genuine hi-res."),
-                },
-                'ranks': {
-                    'Dynamic Range': ('DR8', 'fail', "Lowest in group."),
-                    'Bandwidth': ('23.5 kHz', 'fail', "Lowest in group (real content ends at 24kHz despite the container's 96kHz rate)."),
-                    'Noise Floor': ('-58 dB', 'fail', "Noisiest in group."),
-                    'Stereo Coherence': ('0.85', 'na', "Weight is 0 — not currently used to break ties."),
-                },
-            },
-        ],
-    ),
-]
-
-
-class _MockComparisonMatrix(QtWidgets.QDialog):
-    """MOCKUP ONLY — hardcoded dummy data, no real analysis wiring.
-
-    Demonstrates the proposed comparison-matrix redesign: one column per
-    check performed (emoji stoplight, colored, explanation in the tooltip),
-    a single merged format column (codec/bitrate/sample-rate/channels read
-    together, the way people are used to seeing them), and one column per
-    Comparison Priority ranking axis tagged and weighted like its matching
-    Options-page slider — the whole column dims to "na" when that weight is
-    0 (here, Stereo Coherence) to demonstrate what "not currently used"
-    looks like. Column headers are abbreviated 3-4 letter tags matching the
-    slider that governs them (e.g. "CLP" <-> "Clipping (CLP)" in Options);
-    hover a header for the full name. For design review only — delete once
-    decided or revised.
-    """
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("File Health Comparison — MOCKUP (dummy data)")
-        self.setModal(False)
-        self.resize(1250, 420)
-
-        layout = QtWidgets.QVBoxLayout(self)
-        notice = QtWidgets.QLabel(
-            "Mockup with dummy data — for reviewing the column layout, tags, and "
-            "stoplight coloring only. Nothing here is wired to real files. Hover a "
-            "column header for its full name, hover a cell for the measurement behind it."
-        )
-        notice.setWordWrap(True)
-        notice.setStyleSheet("color: #8d5500; font-style: italic;")
-        layout.addWidget(notice)
-
-        full_names = ['File', 'Tier', 'Format']
-        headers = list(full_names)
-        for check_name in _MOCK_CHECK_COLUMNS:
-            full_names.append(check_name)
-            headers.append(_MOCK_CHECK_TAGS[check_name])
-        for label, weight in _MOCK_RANK_COLUMNS:
-            weight_note = f"Comparison Priority weight: {weight}/10" + (" (not currently used)" if not weight else "")
-            full_names.append(f"{label} — {weight_note}")
-            headers.append(_MOCK_RANK_TAGS[label])
-
-        self.tree = QtWidgets.QTreeWidget(self)
-        self.tree.setHeaderLabels(headers)
-        for col, full_name in enumerate(full_names):
-            self.tree.headerItem().setToolTip(col, full_name)
-        self.tree.setColumnWidth(0, 200)
-        self.tree.setColumnWidth(2, 230)
-        for col in range(1, len(headers)):
-            if col != 2:
-                self.tree.setColumnWidth(col, 70)
-        self.tree.setRootIsDecorated(True)
-        layout.addWidget(self.tree)
-
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, self)
-        buttons.rejected.connect(self.close)
-        layout.addWidget(buttons)
-
-        for key, rows in _MOCK_GROUPS:
-            self._render_mock_group(key, rows)
-
-    def _render_mock_group(self, key: str, rows: list[dict[str, object]]) -> None:
-        header = QtWidgets.QTreeWidgetItem([key])
-        header.setFirstColumnSpanned(True)
-        italic = header.font(0)
-        italic.setItalic(True)
-        header.setFont(0, italic)
-        self.tree.addTopLevelItem(header)
-
-        for row in rows:
-            item = QtWidgets.QTreeWidgetItem([str(row['file']), str(row['tier']), _mock_format_text(row['meta'])])
-            item.setToolTip(2, _mock_format_tooltip(row['meta']))
-            col = 3
-            for check_name in _MOCK_CHECK_COLUMNS:
-                state, tooltip = row['checks'][check_name]
-                self._paint_cell(item, col, state, tooltip)
-                col += 1
-            for label, weight in _MOCK_RANK_COLUMNS:
-                value, state, tooltip = row['ranks'][label]
-                effective_state = state if weight else 'na'
-                effective_tooltip = (
-                    tooltip if weight else "Weight is 0 — this axis is not currently used to break ties."
-                )
-                self._paint_cell(item, col, effective_state, f"{value} — {effective_tooltip}")
-                col += 1
-            header.addChild(item)
-        header.setExpanded(True)
-
-    def _paint_cell(self, item: QtWidgets.QTreeWidgetItem, col: int, state: str, tooltip: str) -> None:
-        item.setText(col, _MOCK_STATE_EMOJI[state])
-        item.setTextAlignment(col, QtCore.Qt.AlignmentFlag.AlignCenter)
-        bg, fg = _MOCK_STATE_COLORS[state]
-        item.setBackground(col, QtGui.QBrush(bg))
-        item.setForeground(col, QtGui.QBrush(fg))
-        item.setToolTip(col, tooltip)
-
-
-
 class CompareResultsPanel(QtWidgets.QDialog):
     """Non-modal panel listing every file in each shared-identity group.
 
@@ -1160,7 +1139,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("File Health Comparison")
         self.setModal(False)
-        self.resize(620, 380)
+        self.resize(1350, 420)
         self._ffmpeg_path = ffmpeg_path
         self._thresholds = thresholds
         self._rank_weights = rank_weights
@@ -1184,9 +1163,20 @@ class CompareResultsPanel(QtWidgets.QDialog):
         layout.addLayout(scan_row)
 
         self.tree = QtWidgets.QTreeWidget(self)
-        self.tree.setHeaderLabels(["File", "Health", "Issues"])
-        self.tree.setColumnWidth(0, 220)
-        self.tree.setColumnWidth(1, 90)
+        full_names = ['File', 'Tier', 'Format'] + _CHECK_COLUMNS + _RANK_COLUMNS + ['Notes']
+        headers = ['File', 'Tier', 'Format']
+        headers += [_CHECK_TAGS[c] for c in _CHECK_COLUMNS]
+        headers += [_RANK_COLUMN_INFO[c][2] for c in _RANK_COLUMNS]
+        headers += ['Notes']
+        self.tree.setHeaderLabels(headers)
+        for col, full_name in enumerate(full_names):
+            self.tree.headerItem().setToolTip(col, full_name)
+        self.tree.setColumnWidth(0, 190)
+        self.tree.setColumnWidth(1, 80)
+        self.tree.setColumnWidth(2, 220)
+        for col in range(3, len(headers) - 1):
+            self.tree.setColumnWidth(col, 55)
+        self.tree.setColumnWidth(len(headers) - 1, 200)
         self.tree.setRootIsDecorated(True)
         self.tree.itemSelectionChanged.connect(self._update_button_states)
         self.tree.itemDoubleClicked.connect(lambda *_: self._show_in_list())
@@ -1250,7 +1240,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         if unscanned:
             for file in group:
                 tier = file.metadata['~health_tier'] or "Not yet scanned"
-                item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, ""])
+                item = QtWidgets.QTreeWidgetItem([file.base_filename, tier])
                 item.setData(0, _FILE_ROLE, file)
                 header.addChild(item)
             header.setExpanded(True)
@@ -1266,15 +1256,34 @@ class CompareResultsPanel(QtWidgets.QDialog):
         else:
             winner = _composite_winner(top_files, self._rank_weights)
 
+        rank_cells_by_file = _rank_cells(group, self._rank_weights)
+
         for file in group:
             tier = file.metadata['~health_tier']
-            stored_flags = file.metadata['~health_flags']
-            issue_parts = stored_flags.split("; ") if stored_flags else []
-            if file.metadata['~health_changed_since_scan']:
-                issue_parts.insert(0, "Changed since last scan")
-            issues = "; ".join(issue_parts) or "—"
-            item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, issues])
+            format_text, format_tooltip = _format_cell(file)
+            item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, format_text])
+            item.setToolTip(2, format_tooltip)
             item.setData(0, _FILE_ROLE, file)
+
+            col = 3
+            check_cells = _check_cells(file, self._thresholds)
+            for check_name in _CHECK_COLUMNS:
+                state, tooltip = check_cells[check_name]
+                self._paint_matrix_cell(item, col, state, tooltip)
+                col += 1
+            for label in _RANK_COLUMNS:
+                state, tooltip = rank_cells_by_file[file][label]
+                self._paint_matrix_cell(item, col, state, tooltip)
+                col += 1
+
+            info_parts = file.metadata['~health_info'].split("; ") if file.metadata['~health_info'] else []
+            if file.metadata['~health_changed_since_scan']:
+                info_parts.insert(0, "Changed since last scan")
+            notes = "; ".join(info_parts)
+            item.setText(col, notes or "—")
+            if notes:
+                item.setToolTip(col, notes.replace("; ", "\n"))
+
             if file is winner:
                 bold = item.font(0)
                 bold.setBold(True)
@@ -1286,6 +1295,14 @@ class CompareResultsPanel(QtWidgets.QDialog):
                         item.setToolTip(1, explanation)
             header.addChild(item)
         header.setExpanded(True)
+
+    def _paint_matrix_cell(self, item: QtWidgets.QTreeWidgetItem, col: int, state: str, tooltip: str) -> None:
+        item.setText(col, _STATE_EMOJI[state])
+        item.setTextAlignment(col, QtCore.Qt.AlignmentFlag.AlignCenter)
+        bg, fg = _STATE_COLORS[state]
+        item.setBackground(col, QtGui.QBrush(bg))
+        item.setForeground(col, QtGui.QBrush(fg))
+        item.setToolTip(col, tooltip)
 
     def _select_file(self, file: File) -> None:
         for i in range(self.tree.topLevelItemCount()):
@@ -1551,19 +1568,6 @@ class CompareAllHealthAction(BaseAction):
         self._panel = panel
 
 
-class MockComparisonMatrixAction(BaseAction):
-    """TEMPORARY — opens the comparison-matrix mockup with dummy data for
-    design review. Remove once the redesign is decided and built for real.
-    """
-
-    TITLE = "File Health: Comparison Matrix Mockup (dummy data)…"
-
-    def callback(self, objs) -> None:
-        window = tagger_instance().window
-        self._dialog = _MockComparisonMatrix(window)
-        self._dialog.show()
-
-
 class HealthProvider(ColumnValueProvider, DelegateProvider):
     """Column that displays health tier as a bookmark icon with an issues tooltip."""
 
@@ -1791,7 +1795,6 @@ def enable(api: PluginApi) -> None:
     api.register_track_action(CompareHealthAction)
     api.register_cluster_action(CompareHealthAction)
     api.register_tools_menu_action(CompareAllHealthAction)
-    api.register_tools_menu_action(MockComparisonMatrixAction)
 
     # Force any already-open tree views to rebuild their header (column
     # count + labels) and recompute every existing row's cell text for the
