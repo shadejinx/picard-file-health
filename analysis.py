@@ -1101,6 +1101,10 @@ class AnalysisResult:
     spectral_bandwidth_hz: float | None
     noise_floor_db: float | None
     stereo_coherence: float | None
+    stream_info: StreamInfo
+    is_out_of_phase: bool | None
+    is_mono_duplicated: bool | None
+    peak_db: float | None
 
 
 def analyze_file(
@@ -1242,6 +1246,8 @@ def analyze_file(
     # material, which is exactly why the branch was left out of the
     # merged graph entirely for those files rather than run and ignored.
     stereo_coherence: float | None = None
+    is_mono_duplicated: bool | None = None
+    is_out_of_phase: bool | None = None
     if channels >= 2:
         is_mono_duplicated, is_out_of_phase = _parse_phasemeter(merged_stderr)
         stereo_coherence = _measure_stereo_coherence(merged_stdout)
@@ -1314,4 +1320,8 @@ def analyze_file(
         spectral_bandwidth_hz=spectral_bandwidth_hz,
         noise_floor_db=noise_floor_db,
         stereo_coherence=stereo_coherence,
+        stream_info=stream_info,
+        is_out_of_phase=is_out_of_phase,
+        is_mono_duplicated=is_mono_duplicated,
+        peak_db=peak_db,
     )
