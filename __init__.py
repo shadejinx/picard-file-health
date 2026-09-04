@@ -923,15 +923,21 @@ _CHECK_TAGS: dict[str, str] = {
 _CHECK_COLUMNS = list(_CHECK_TAGS)
 
 # rank axis label -> (metadata key, plugin_config weight key, tag,
-# higher-value-is-better) — same four axes as _RANK_AXES/_composite_winner,
-# with display info added for the matrix columns.
+# higher-value-is-better) — for the three axes with no absolute
+# pass/fail meaning of their own anywhere in analysis.py (only relative
+# to whichever files are being compared right now). Dynamic Range is
+# deliberately NOT here — see _dr14_band_cell for why it needs
+# different treatment: unlike these three, it has a real absolute band
+# that decides Tier, so relative-in-group coloring would show "pass"
+# for the best-in-group file even when every file in the group is
+# absolutely Poor.
 _RANK_COLUMN_INFO: dict[str, tuple[str, str, str, bool]] = {
-    'Dynamic Range': ('~health_dr14', 'rank_weight_dr14', 'DYN', True),
     'Bandwidth': ('~health_bandwidth_hz', 'rank_weight_bandwidth', 'BND', True),
     'Noise Floor': ('~health_noise_floor_db', 'rank_weight_noise_floor', 'NSF', False),
     'Stereo Coherence': ('~health_stereo_coherence', 'rank_weight_coherence', 'COH', True),
 }
 _RANK_COLUMNS = list(_RANK_COLUMN_INFO)
+_DR14_TAG = 'DYN'
 
 _LOSSLESS_CODECS = {'flac', 'alac', 'wavpack', 'tta', 'ape'}
 
@@ -1038,8 +1044,11 @@ def _rank_cells(group: list[File], rank_weights: dict[str, int]) -> dict[File, d
         weight = rank_weights.get(weight_key, 0)
         values = {f: _read_metric(f, metadata_key) for f in group}
         measured = {f: v for f, v in values.items() if v is not None}
-        best = max(measured.values()) if higher_is_better else min(measured.values()) if measured else None
-        worst = min(measured.values()) if higher_is_better else max(measured.values()) if measured else None
+        if measured:
+            best = max(measured.values()) if higher_is_better else min(measured.values())
+            worst = min(measured.values()) if higher_is_better else max(measured.values())
+        else:
+            best = worst = None
         for f in group:
             v = values[f]
             if weight <= 0:
@@ -1055,6 +1064,46 @@ def _rank_cells(group: list[File], rank_weights: dict[str, int]) -> dict[File, d
             else:
                 result[f][label] = ('amber', f"{v:.1f} — middle of the group (weight {weight}/10).")
     return result
+
+
+def _dr14_band_cell(file: File, thresholds: analysis.Thresholds, rank_weight: int) -> tuple[str, str]:
+    """Dynamic Range's cell, unlike the three purely-relative ranking
+    axes: DR14 has its own absolute Poor/Ok/Good/Great/Excellent band
+    (it's what actually decides Tier for gate-free files — see
+    analyze_file's own tier logic), so it's colored by that band, not
+    relative to whichever other files happen to be in this compare
+    group. Relative coloring would show "best in group" as green even
+    when every file compared is absolutely Poor — a real contradiction
+    with the Tier column, not just a cosmetic quibble.
+
+    The Comparison Priority weight still matters for tie-breaking among
+    same-tier files (see _composite_winner), so it's noted in the
+    tooltip, but never dims this column to "na" the way a 0 weight does
+    for the purely-relative axes — DR14 affects Tier regardless of
+    whether its weight is used for tie-breaking.
+    """
+    dr14 = _read_metric(file, '~health_dr14')
+    if dr14 is None:
+        return 'na', "Skipped this scan (file already gated \"Bad\" by another check), or not yet scanned."
+    poor = analysis.DR14_POOR_THRESHOLD - thresholds.dr14_shift
+    ok = analysis.DR14_OK_THRESHOLD - thresholds.dr14_shift
+    good = analysis.DR14_GOOD_THRESHOLD - thresholds.dr14_shift
+    great = analysis.DR14_GREAT_THRESHOLD - thresholds.dr14_shift
+    if dr14 < poor:
+        state, band = 'fail', "Poor"
+    elif dr14 < ok:
+        state, band = 'amber', "Ok"
+    elif dr14 < good:
+        state, band = 'amber', "Good"
+    elif dr14 < great:
+        state, band = 'pass', "Great"
+    else:
+        state, band = 'pass', "Excellent"
+    weight_note = (
+        f" Comparison Priority weight: {rank_weight}/10." if rank_weight
+        else " Weight is 0 — not currently used to break ties."
+    )
+    return state, f"DR{int(dr14)} — {band} on the TT DR Offline Meter scale.{weight_note}"
 
 
 def _format_cell(file: File) -> tuple[str, str]:
@@ -1163,9 +1212,10 @@ class CompareResultsPanel(QtWidgets.QDialog):
         layout.addLayout(scan_row)
 
         self.tree = QtWidgets.QTreeWidget(self)
-        full_names = ['File', 'Tier', 'Format'] + _CHECK_COLUMNS + _RANK_COLUMNS + ['Notes']
+        full_names = ['File', 'Tier', 'Format'] + _CHECK_COLUMNS + ['Dynamic Range'] + _RANK_COLUMNS + ['Notes']
         headers = ['File', 'Tier', 'Format']
         headers += [_CHECK_TAGS[c] for c in _CHECK_COLUMNS]
+        headers += [_DR14_TAG]
         headers += [_RANK_COLUMN_INFO[c][2] for c in _RANK_COLUMNS]
         headers += ['Notes']
         self.tree.setHeaderLabels(headers)
@@ -1271,6 +1321,11 @@ class CompareResultsPanel(QtWidgets.QDialog):
                 state, tooltip = check_cells[check_name]
                 self._paint_matrix_cell(item, col, state, tooltip)
                 col += 1
+            dr14_state, dr14_tooltip = _dr14_band_cell(
+                file, self._thresholds, self._rank_weights.get('rank_weight_dr14', 0)
+            )
+            self._paint_matrix_cell(item, col, dr14_state, dr14_tooltip)
+            col += 1
             for label in _RANK_COLUMNS:
                 state, tooltip = rank_cells_by_file[file][label]
                 self._paint_matrix_cell(item, col, state, tooltip)
