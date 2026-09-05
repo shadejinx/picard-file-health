@@ -1,36 +1,48 @@
-# Handoff — File Health plugin, two-tier rewrite COMPLETE (as of session 3)
+# Handoff — File Health plugin, two-tier rewrite COMPLETE (as of session 4)
 
-**The rewrite described in this document is done and verified**, not in
-progress. Three sessions total: session 1 designed the two-tier redesign
-(see "The redesign" below) and hit a context limit before implementing it;
-session 2 built and validated the two new File Health checks; session 3
-(this one) built both scoring engines, rewrote `analyze_file`, split the
-metadata schema, rewrote both UI surfaces (tree column, compare-matrix),
-updated the Options page copy, and calibrated Track Health's tier
-boundaries against real data. Every item in session 2's "Concrete build
-plan" is done. See "Session 3 — rewrite complete" below for exactly what
-changed and how it was verified before treating anything below that as
-historical background rather than current state.
+**Four sessions total.** Session 1 designed the two-tier redesign (see
+"The redesign" below); session 2 built the two new File Health checks;
+session 3 built both scoring engines and the two-tier UI; session 4 (this
+one) took explicit user direction to split File Health and Track Health
+into **fully independent scans, columns, and menus** — not just two
+tiers computed by one combined pass. See "Session 4 — independent
+scans" below for exactly what changed; treat everything in "Session 3 —
+rewrite complete" below as superseded wherever it describes a single
+combined `analyze_file()`/`AnalysisResult` or one dual-icon column —
+that architecture no longer exists at HEAD.
 
 **Repo**: `~/Documents/code_repo/picard-file-health`, own git repo.
-**HEAD**: `1d77889` "Calibrate Track Health tier boundaries against real
-80-file sample; docstring polish" — working tree clean, nothing
+**HEAD**: `6fc1598` "Split into fully independent File Health / Track
+Health scans, columns, and menus" — working tree clean, nothing
 uncommitted. Installed and confirmed loading cleanly in a real running
 Picard instance at this exact commit (see verification section).
-**`analysis.py`'s tier logic at HEAD is the real, current, two-tier
-architecture** — `AnalysisResult.file_tier`/`.track_tier`, not the old
-single `.tier` this doc's older sections still describe when talking
-about "gates". Read "Session 3 — rewrite complete" first.
+**`analysis.py` has no `analyze_file()`/`AnalysisResult` anymore** —
+two independent entry points, `analyze_file_health()` →
+`FileHealthResult` and `analyze_track_health()` → `TrackHealthResult`,
+each with its own minimal-vs-heavier decode and its own terminal
+"can't measure" result type. Read "Session 4 — independent scans"
+first.
 
 ## What this is
 
 A Picard v3 plugin that analyzes audio files for real quality/integrity
-defects and surfaces them as an icon column in Picard's file/album tree, plus
-a duplicate-comparison panel (a full matrix now, not a 3-column list — see
-below) for deciding which copy of a matched recording is better.
+defects. Two fully independent checks, each with its own scan action, its
+own column, and its own tier vocabulary:
 
-- `__init__.py` — plugin registration, all UI (health column delegate,
-  scan/compare actions, comparison-matrix panel, options page).
+- **File Health** — structural (decode success, corruption, tag/artwork
+  integrity, bitrate/codec grading). No sliders. Available everywhere
+  (left/unmatched-file view and right/matched-track view alike).
+- **Track Health** — perceptual (clipping, true peak, spectral cutoff,
+  phase, dynamic range, hum). Has the sensitivity sliders. Right side
+  (matched-track context) only — see "Session 4" below for exactly why
+  and how that's enforced.
+
+A "File Health Details" window (any files, not just confirmed
+duplicates) shows both side by side in a full matrix for deciding which
+copy of a matched recording is better, or just inspecting one file.
+
+- `__init__.py` — plugin registration, all UI (both column delegates,
+  scan/details actions, details-matrix panel, options page).
 - `analysis.py` — the real analysis engine, shells out to `ffmpeg`/`ffprobe`.
   No Picard imports; reusable standalone.
 - `assets/` — real, found-in-the-wild bad tracks pulled from the user's own
@@ -38,9 +50,115 @@ below) for deciding which copy of a matched recording is better.
   describing why each one was flagged. Use these for regression testing new
   heuristics — they're real, not synthetic.
 
+## Session 4 — independent scans, columns, and menus
+
+User's explicit direction, verbatim from the session: separate File
+Health and Track Health into genuinely independent scans (not two tiers
+computed by one shared decode), separate columns, and a left/right menu
+split where the left (unmatched-file) view only ever shows File Health.
+
+**`analysis.py`**: `analyze_file()`/`AnalysisResult` removed entirely,
+replaced by two independent entry points:
+- `analyze_file_health(filename, ffmpeg_path=None) -> FileHealthResult`
+  — a minimal decode (`_run_corruption_decode`: `-err_detect compliant
+  -map 0:a -f null -`, no filter graph at all) plus the existing
+  independent artwork/tag/size-mismatch checks. Cheap, no sliders.
+- `analyze_track_health(filename, ffmpeg_path=None, thresholds=None) ->
+  TrackHealthResult` — the existing heavier merged-filter-graph decode
+  (astats/loudnorm/highpass/aphasemeter) + DR14/hum. Has sliders.
+
+Neither depends on the other having run. Each has its own terminal
+"can't measure" result (`_broken_file_health_result` /
+`_broken_track_health_result`) instead of a shared one.
+
+**Real regression caught and fixed while validating this split**: the
+first version of `_run_corruption_decode` had no explicit `-map`, so
+ffmpeg's default stream selection also tried decoding an embedded
+attached-pic/video stream when present. A file with genuinely fine
+audio but a separately-corrupt embedded image (already its own defect,
+covered by `_detect_artwork_corruption`) got misreported as `Broken`
+for the wrong reason — caught via the full asset regression (the
+Chevelle fixture flipped from `Bad` to `Broken`), confirmed directly
+(`-i ... -f null -` exits 69, `-map 0:a` exits 0 on the same file).
+Fixed by adding `-map 0:a`. **Lesson for next session**: always rerun
+the full `assets/` regression after touching any decode invocation,
+even a "shouldn't matter" flag change — this one did.
+
+**`__init__.py`**:
+- `ScanFileHealthAction` ("Scan File Health…") and
+  `ScanTrackHealthAction` ("Scan Track Health…") are fully separate
+  actions/background tasks now, backed by
+  `_scan_file_health_one`/`_scan_track_health_one` and
+  `_file_health_scan_finished`/`_track_health_scan_finished`. Metadata
+  split: `~health_file_content_hash`/`~health_file_changed_since_scan`/
+  `~health_file_info` vs. the `~health_track_*` equivalents — each
+  scan's own staleness is now tracked independently.
+- Auto-scan-on-file-load now runs File Health only (cheap, appropriate
+  for bulk/automatic use). Track Health stays manual/on-demand only.
+- Two separate registered columns: `FileHealthProvider`/
+  `FileHealthColumnDelegate` and `TrackHealthProvider`/
+  `TrackHealthColumnDelegate` (sharing paint/tooltip logic via
+  `_SingleHealthColumnDelegate`), replacing the old single dual-icon
+  column. **Left/right split, exactly as directed**: File Health column
+  registered on both `FILE_VIEW` and `ALBUM_VIEW`; Track Health column
+  `ALBUM_VIEW` only.
+- **Action registration, exactly as directed**: `ScanFileHealthAction`
+  registered as a file + cluster + track action (available everywhere —
+  the *only* action the left/unmatched-file view ever shows).
+  `ScanTrackHealthAction` and the new Details action registered as
+  **track actions only** (right side/matched-recording context only).
+  `ShowAllFileHealthDetailsAction` stays a Tools-menu action (global,
+  unaffected by the left/right per-item-context split).
+- "Compare File Health" renamed and generalized into "File Health
+  Details" (`DetailsPanel`, `ShowFileHealthDetailsAction`/
+  `ShowAllFileHealthDetailsAction`, title "File Health Details…"/"All
+  File Health Details…"). No longer requires a confirmed duplicate:
+  `_group_files_for_details` groups matched files by Track as before,
+  but now also emits a singleton group per completely unmatched file —
+  any file's health (scanned or not, independently per scan type) can
+  be inspected. Rows always render now (dropped the old special-cased
+  "any file in the group unscanned -> collapse the whole group into a
+  bare two-column list" branch) — File Tier/Track Tier cells just show
+  "Not yet scanned" or "—" (Broken file, Track Health structurally N/A)
+  directly per file, independently. The panel's own scan buttons split
+  into "Scan File Health"/"Scan Track Health" (each scans every listed
+  file for that one type), replacing "Scan Unscanned"/"Rescan All".
+- Options page: "File Health Sensitivity" section renamed "Track Health
+  Sensitivity" (the sliders were always Track Health checks — File
+  Health has none by design, this was a leftover naming mismatch from
+  session 3). Auto-scan checkbox label/description updated to say
+  explicitly it's File Health only.
+
+**Verification performed**: headless module import; independent-scan
+round trip confirmed directly via metadata inspection (scanning File
+Health alone leaves every Track Health field/column blank, and vice
+versa); both split columns and the generalized Details panel (mixed
+scanned/partially-scanned/fully-unscanned-singleton rows in one panel)
+rendered offscreen via Qt (`QT_QPA_PLATFORM=offscreen`, `import
+picard.resources` for icons) and visually inspected; full 22-file
+`assets/` regression (0 errors after the `-map 0:a` fix); a 150-file
+real-library regression (0 errors, exactly one genuine pre-existing
+`Broken` file confirmed by hand — an unrelated container misdetection
+that fails identically with or without the new decode flag, not a
+regression); installed into a real running Picard instance via
+`picard-cli --reinstall`, byte-diff confirmed, live log confirms clean
+`enable()` with no traceback at HEAD.
+
+**Not yet done / possible follow-up**: the Details panel's own
+Comparison Priority tie-break logic and per-check matrix cells are
+unchanged from session 3 (still fine — they already read whichever
+scan's metrics are present and degrade to "na"/"not yet measured"
+gracefully). Nobody has manually exercised the actual right-click
+context menus in a live Picard window yet (only registration code +
+offscreen rendering were verified) — worth a real click-through next
+session if anything about the menu split looks off in practice.
+
 ## Session 3 — rewrite complete
 
-Every step of session 2's build plan is done, in order:
+Every step of session 2's build plan is done, in order — **note**: this
+section's references to a single `analyze_file()`/`AnalysisResult` and
+one dual-icon column are now historical; see "Session 4" above for the
+current architecture.
 
 1. **Two new File Health checks** — done in session 2 (Xing-header size
    mismatch, non-audio corruption).
