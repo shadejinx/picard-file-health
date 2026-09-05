@@ -300,12 +300,23 @@ TRACK_HEALTH_WEIGHTS: dict[str, float] = {
 
 
 # Track Health tier boundaries on the 0..1 weighted composite score.
-# PLACEHOLDER pending real-data calibration (see build plan in
-# HANDOFF.md) — an even 3-way split of the 0..1 range as a starting
-# point only, not yet validated against a real library sample.
-TRACK_HEALTH_BAD_THRESHOLD = 0.5
+# Calibrated against a real 80-file random sample from the "master"
+# corpus (see HANDOFF.md): scores ran continuously from 0.083 to
+# 0.406 with no sharp natural gap, clustering around 0.29-0.30 (most
+# ordinary loud modern masters share a similar True-Peak/Clipping
+# profile) — so boundaries are placed by percentile, not a gap in the
+# data. 0.35 (top ~6% of the sample) separated files with a real
+# *compounding* pattern (True Peak overs + audible mains hum + a
+# heavily compressed DR5-DR8 master, all at once) from the broad
+# middle; 0.15 (bottom ~8%) separated the cleanest files (no hum, high
+# DR, no true-peak overs). Yields Excellent 7.5% / Great 30% / Good
+# 56% / Bad 6% on the calibration sample — Bad reserved for real,
+# multi-factor degradation, not a single borderline reading, matching
+# this redesign's whole reason for existing (see HANDOFF.md's "The
+# redesign").
+TRACK_HEALTH_BAD_THRESHOLD = 0.35
 TRACK_HEALTH_GOOD_THRESHOLD = 0.25
-TRACK_HEALTH_GREAT_THRESHOLD = 0.1
+TRACK_HEALTH_GREAT_THRESHOLD = 0.15
 
 
 def track_tier_from_score(score: float) -> str:
