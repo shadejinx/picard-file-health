@@ -37,6 +37,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+import mutagen
 from mutagen.mp3 import (
     HeaderNotFoundError,
     MPEGFrame,
@@ -298,6 +299,48 @@ HUM_BAND_MIN_RMS_DB = -90.0
 # real, sustained drop from typical mixed-music loudness.
 HUM_SILENCE_THRESHOLD_DB = -25.0
 HUM_SILENCE_MIN_DURATION_SECONDS = 1.0
+
+# Xing/Info VBR header "bytes" field: the byte-count of the MP3 audio
+# stream (from the first frame through the last) the encoder itself
+# recorded at encode time — used by players/seekers to map a seek
+# percentage to a byte offset without a full duration scan. Comparing
+# this declared count against the real on-disk audio-stream size (file
+# size minus any ID3v2/ID3v1 wrapper) is a genuine structural fact
+# about the container, independent of *why* they disagree — could be
+# extra data appended after the original stream ended (concatenation),
+# data missing from the end (truncation), or the encoder itself writing
+# a wrong value. This module deliberately does not try to diagnose
+# which — see _detect_size_mismatch's docstring for why that
+# distinction isn't reliably recoverable from the header disagreement
+# alone, unlike the (rejected) declared-vs-decoded-duration truncation
+# heuristic this deliberately avoids repeating: that one compared
+# *duration*, derived either from this same unreliable header or from a
+# full decode, giving no independent signal to check either against.
+# This instead compares the header's own field directly against
+# `os.path.getsize()` — a fact no decode or duration math can get wrong.
+#
+# Ffmpeg's own mp3 demuxer (libavformat/mp3dec.c) does an equivalent
+# comparison to log "invalid concatenated file detected"/"filesize and
+# duration do not match" internally, but was confirmed empirically (see
+# HANDOFF) to not reliably surface in this module's own invocations,
+# and its raw log line conflates real container inconsistency with a
+# separate false-positive mode this module already found and rejected
+# in the truncation-check investigation. Reimplemented directly against
+# mutagen's own Xing header parser (already a dependency, see
+# _read_lame_header) instead of relying on that log line, both for
+# reliability and to compute the real byte-level ratio rather than just
+# a fired/not-fired boolean.
+#
+# Threshold calibrated against a real 500-file random sample of the
+# user's library (see HANDOFF): 370 files carried a usable Xing "bytes"
+# field; 366 landed at <=0.43% mismatch (floating-point/frame-rounding
+# noise around the encoder's own byte accounting), then a clean gap to
+# 4 real outliers at 21%-182%. Three of those four also independently
+# showed CORRUPTION_BITS_LEFT_PATTERN hits (1, 1, and 181 occurrences)
+# in the very same files — corroborating evidence this is catching a
+# real structural anomaly, not encoder noise. 5% sits with >10x margin
+# above the noise ceiling and well below every confirmed-real case.
+SIZE_MISMATCH_RATIO_THRESHOLD = 0.05
 
 FFMPEG_TIMEOUT_SECONDS = 60
 
@@ -769,6 +812,148 @@ def _read_lame_header(filename: str) -> LameHeader | None:
 
 
 @dataclass
+class SizeMismatch:
+    direction: str  # 'extra_data' (declared < actual) or 'missing_data' (declared > actual)
+    ratio: float
+    declared_bytes: int
+    actual_bytes: int
+
+
+def _id3v2_size(fh) -> int:
+    """Bytes occupied by a leading ID3v2 tag, 0 if none present. Reads the
+    synchsafe size field directly rather than via mutagen's ID3 class —
+    only the byte count is needed here, not a parsed tag."""
+    fh.seek(0)
+    header = fh.read(10)
+    if len(header) < 10 or header[:3] != b'ID3':
+        return 0
+    size = ((header[6] & 0x7F) << 21) | ((header[7] & 0x7F) << 14) | ((header[8] & 0x7F) << 7) | (header[9] & 0x7F)
+    return 10 + size
+
+
+def _id3v1_size(fh) -> int:
+    """128 bytes for a trailing ID3v1 tag, 0 if none present."""
+    fh.seek(0, os.SEEK_END)
+    if fh.tell() < 128:
+        return 0
+    fh.seek(-128, os.SEEK_END)
+    return 128 if fh.read(3) == b'TAG' else 0
+
+
+def _detect_size_mismatch(filename: str) -> SizeMismatch | None:
+    """Compares the Xing/Info header's own declared audio-stream byte
+    count against the real on-disk audio-stream size (file size minus
+    any ID3v2/ID3v1 wrapper) — see SIZE_MISMATCH_RATIO_THRESHOLD for the
+    real-data calibration behind the threshold and why this deliberately
+    doesn't try to label the cause (concatenation vs. truncation vs. a
+    bad encoder) as anything more specific than direction + magnitude.
+
+    None means "nothing to compare" — no Xing/Info header present (many
+    valid MP3s have none, e.g. real CBR encodes), a non-MP3/non-layer-3
+    frame, or an unreadable/corrupt header. Absence is not itself a
+    defect; a corrupt header is more useful reported by the separate
+    audio-corruption check, which reads real decode-time bitstream
+    state rather than this file's static byte counts.
+    """
+    try:
+        actual_bytes = os.path.getsize(filename)
+        with open(filename, 'rb') as fh:
+            id3v2 = _id3v2_size(fh)
+            id3v1 = _id3v1_size(fh)
+            fh.seek(0)
+            skip_id3(fh)
+            frame = MPEGFrame(fh)
+            if frame.layer != 3:
+                return None
+            offset = XingHeader.get_offset(frame)
+            fh.seek(frame.frame_offset + offset, 0)
+            xing = XingHeader(fh)
+    except (HeaderNotFoundError, XingHeaderError, OSError):
+        return None
+    if xing.bytes is None or xing.bytes <= 0:
+        return None
+    declared = xing.bytes
+    audio_actual = actual_bytes - id3v2 - id3v1
+    smaller = min(declared, audio_actual)
+    if smaller <= 0:
+        return None
+    ratio = abs(declared - audio_actual) / smaller
+    if ratio <= SIZE_MISMATCH_RATIO_THRESHOLD:
+        return None
+    direction = 'extra_data' if declared < audio_actual else 'missing_data'
+    return SizeMismatch(direction=direction, ratio=ratio, declared_bytes=declared, actual_bytes=audio_actual)
+
+
+def _detect_artwork_corruption(ffmpeg: str, ffprobe: str, filename: str) -> bool:
+    """True if the file has an embedded artwork/attached-pic stream and
+    ffmpeg's own decoder can't decode its first frame.
+
+    Confirmed empirically that the real analyze_file pipeline (explicit
+    `-filter_complex` + explicit `-map` for audio-only outputs, see
+    _run_merged_analysis) never touches any video/attached-pic stream —
+    this is a genuinely new code path, not something the existing audio
+    checks already exercise incidentally.
+
+    Validated against engineered fixtures: a JPEG with ~5% of its scan
+    data zeroed out, or truncated to 20% of its original length but
+    still containing its SOF/DQT/SOS header segments, decodes cleanly
+    (ffmpeg's mjpeg decoder tolerates isolated bit errors and missing
+    trailing data, emitting a garbled but "successfully decoded" frame
+    with only a warning) — same class of limitation as the audio
+    bit-reservoir check (`bits_left`): catches structural corruption,
+    not every possible pixel-level defect. Truncating past the header
+    segments entirely (missing SOF/quantization tables) reliably
+    produces a real decoder error and non-zero exit code.
+    """
+    probe = _run_subprocess(
+        [
+            ffprobe, '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=index', '-of', 'csv=p=0', filename,
+        ]
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return False
+    decode = _run_subprocess(
+        [
+            ffmpeg, '-nostdin', '-hide_banner', '-v', 'error', '-i', filename,
+            '-map', '0:v:0', '-frames:v', '1', '-f', 'null', '-',
+        ]
+    )
+    return decode.returncode != 0
+
+
+def _detect_tag_structure_error(filename: str) -> str | None:
+    """Parses every tag frame/block via mutagen's own generic
+    `mutagen.File()` (format-detecting, used across all of Picard core's
+    own tag reading) and returns a short description of the first
+    exception raised while doing so, or None if tags parsed cleanly (or
+    the file has no tags at all — absence is not itself a defect).
+
+    A tag structure malformed enough to raise here is a genuine
+    container-level defect independent of anything the audio-stream
+    decode already checks: mutagen parses ID3/Vorbis-comment/APEv2/MP4
+    atom structure directly, a different code path than ffmpeg's own
+    (more lenient) container/tag reading.
+
+    Validated against a real 100-file M4A sample plus this repo's own
+    fixtures: 0 false positives, but one real fixture (a 3 Doors Down
+    M4A) confirmed a genuine defect — its first `----` freeform atom
+    goes straight from the atom header to a payload-less `data`
+    sub-atom, skipping the `mean`/`name` sub-atoms the freeform-atom
+    spec requires to identify which custom tag it is. ffmpeg's own MP4
+    tag reader silently tolerates the malformed atom (every other tag
+    on the file reads fine via ffprobe); mutagen's stricter parser
+    correctly can't, which is exactly the kind of container-level
+    defect this check exists to surface.
+    """
+    try:
+        mutagen.File(filename)
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+@dataclass
 class StreamInfo:
     sample_rate: int | None
     codec_name: str | None
@@ -1124,6 +1309,7 @@ class AnalysisResult:
     is_out_of_phase: bool | None
     is_mono_duplicated: bool | None
     peak_db: float | None
+    size_mismatch: SizeMismatch | None
 
 
 def analyze_file(
@@ -1185,6 +1371,7 @@ def analyze_file(
     # continuous, cause-agnostic estimate rather than a defect gate).
     spectral_bandwidth_hz = _measure_bandwidth(merged_stderr, stream_info.sample_rate, peak_db)
     corruption_note = _detect_corruption_signature(merged_stderr)
+    size_mismatch = _detect_size_mismatch(filename)
 
     issues: list[str] = []
     info: list[str] = []
@@ -1195,6 +1382,31 @@ def analyze_file(
 
     if corruption_note is not None:
         info.append(corruption_note)
+
+    if size_mismatch is not None:
+        declared_mb = size_mismatch.declared_bytes / 1_000_000
+        actual_mb = size_mismatch.actual_bytes / 1_000_000
+        if size_mismatch.direction == 'extra_data':
+            issues.append(
+                f"File has {size_mismatch.ratio * 100:.0f}% more audio data than its own VBR header "
+                f"accounts for ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
+                "consistent with extra data appended after the original track ended"
+            )
+        else:
+            issues.append(
+                f"File has {size_mismatch.ratio * 100:.0f}% less audio data than its own VBR header "
+                f"declares ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
+                "consistent with the file being truncated or rewritten after encoding"
+            )
+
+    if _detect_artwork_corruption(ffmpeg, ffprobe, filename):
+        issues.append(
+            "Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it"
+        )
+
+    tag_error = _detect_tag_structure_error(filename)
+    if tag_error is not None:
+        issues.append(f"Malformed tag structure — {tag_error}")
 
     has_clipping = flat_factor > thresholds.clip_flat_factor
     if has_clipping:
@@ -1343,4 +1555,5 @@ def analyze_file(
         is_out_of_phase=is_out_of_phase,
         is_mono_duplicated=is_mono_duplicated,
         peak_db=peak_db,
+        size_mismatch=size_mismatch,
     )
