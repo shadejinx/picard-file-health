@@ -1384,6 +1384,34 @@ def _tunable(slider_name: str) -> str:
     return f' (Adjust in Options \u2192 File Health: "{slider_name}" slider)'
 
 
+def _run_corruption_decode(ffmpeg: str, filename: str) -> tuple[str, int]:
+    """Minimal ffmpeg decode for File Health's own purposes only: checks
+    decodability (returncode) and surfaces `bits_left` diagnostics (see
+    CORRUPTION_BITS_LEFT_PATTERN) via `-err_detect compliant`, with no
+    filter graph at all. File Health doesn't need astats/loudnorm/
+    highpass/aphasemeter — those are Track Health concerns with their
+    own separate (heavier) decode in analyze_track_health. Kept
+    deliberately independent so a File-Health-only scan (bulk/auto-scan
+    use, or the left-pane unmatched-file view) never pays for
+    perceptual measurements it doesn't use.
+
+    `-map 0:a` is required, not optional: without an explicit map,
+    ffmpeg's default stream selection also decodes an embedded
+    attached-pic/video stream if present, so a file with genuinely
+    fine audio but a separately-corrupt embedded image (see
+    _detect_artwork_corruption, which already covers exactly this
+    defect on its own terms) would otherwise fail this decode and be
+    misreported as `Broken` — confirmed empirically on a real fixture
+    (Chevelle - The Red.mp3, PNG-tagged artwork that's actually JPEG
+    bytes): the bare `-i ... -f null -` invocation exits 69, `-map 0:a`
+    exits 0 with the same file's genuinely fine audio.
+    """
+    proc = _run_subprocess(
+        [ffmpeg, '-nostdin', '-hide_banner', '-err_detect', 'compliant', '-i', filename, '-map', '0:a', '-f', 'null', '-']
+    )
+    return proc.stderr, proc.returncode
+
+
 FILE_TIER_BROKEN = "Broken"
 FILE_TIER_BAD = "Bad"
 FILE_TIER_GOOD = "Good"
@@ -1479,10 +1507,111 @@ def compute_track_score(inputs: TrackHealthInputs, thresholds: Thresholds) -> fl
 
 
 @dataclass
-class AnalysisResult:
+class FileHealthResult:
     file_tier: str
-    track_tier: str | None
     file_issues: list[str]
+    info: list[str]
+    content_hash: str
+    stream_info: StreamInfo
+
+
+def _broken_file_health_result(filename: str, reason: str) -> FileHealthResult:
+    """A file ffmpeg can't decode at all is a real, persisted File Health
+    fact (`Broken`, terminal), not a transient scan error. Only
+    `content_hash` can still be computed (it hashes raw bytes, no decode
+    needed) — everything else genuinely has nothing to report.
+    """
+    return FileHealthResult(
+        file_tier=FILE_TIER_BROKEN,
+        file_issues=[reason],
+        info=[],
+        content_hash=content_hash(filename),
+        stream_info=StreamInfo(None, None, None, None, None),
+    )
+
+
+def analyze_file_health(filename: str, ffmpeg_path: str | None = None) -> FileHealthResult:
+    """Runs on a background thread. Structural-only, no sliders (see
+    HANDOFF.md's "The redesign") — deliberately independent of
+    analyze_track_health's own (heavier) decode; each scan can run
+    without the other's cost, per the user's own request to keep File
+    Health and Track Health as fully separate scans, not two facets of
+    one combined pass. Every check here answers "is this file
+    structurally sound", not "does it sound good": decode success,
+    `bits_left` bit-reservoir corruption, non-audio corruption (embedded
+    artwork/tag structure), a Xing-header size mismatch, and
+    codec/bitrate transparency grading.
+
+    `FfmpegNotFoundError`/`FfmpegVersionTooOldError` still raise — an
+    environment problem unrelated to any one file, not a per-file
+    verdict — but a decode failure on this specific file is a real
+    persisted `file_tier="Broken"` result (see _broken_file_health_result),
+    not an exception.
+    """
+    ffmpeg = find_ffmpeg(ffmpeg_path)
+    ffprobe = _find_ffprobe(ffmpeg)
+    check_ffmpeg_version(ffmpeg)
+    stream_info = _probe_stream_info(ffprobe, filename)
+
+    stderr, returncode = _run_corruption_decode(ffmpeg, filename)
+    if returncode != 0:
+        return _broken_file_health_result(
+            filename,
+            f"ffmpeg couldn't decode {os.path.basename(filename)} as audio "
+            "(corrupt, truncated, unsupported format, or a decode timeout)",
+        )
+
+    file_issues: list[str] = []
+    info: list[str] = []
+
+    bitrate_note = _bitrate_transparency_note(stream_info)
+    if bitrate_note is not None:
+        info.append(bitrate_note)
+
+    corruption_note = _detect_corruption_signature(stderr)
+    if corruption_note is not None:
+        # A real decoder-level structural signal (see CORRUPTION_BITS_
+        # LEFT_PATTERN) — presence (not count, see that constant's own
+        # calibration note) is the validated signal.
+        file_issues.append(corruption_note)
+
+    size_mismatch = _detect_size_mismatch(filename)
+    if size_mismatch is not None:
+        declared_mb = size_mismatch.declared_bytes / 1_000_000
+        actual_mb = size_mismatch.actual_bytes / 1_000_000
+        if size_mismatch.direction == 'extra_data':
+            file_issues.append(
+                f"File has {size_mismatch.ratio * 100:.0f}% more audio data than its own VBR header "
+                f"accounts for ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
+                "consistent with extra data appended after the original track ended"
+            )
+        else:
+            file_issues.append(
+                f"File has {size_mismatch.ratio * 100:.0f}% less audio data than its own VBR header "
+                f"declares ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
+                "consistent with the file being truncated or rewritten after encoding"
+            )
+
+    if _detect_artwork_corruption(ffmpeg, ffprobe, filename):
+        file_issues.append("Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it")
+
+    tag_error = _detect_tag_structure_error(filename)
+    if tag_error is not None:
+        file_issues.append(f"Malformed tag structure — {tag_error}")
+
+    file_tier = _compute_file_tier(file_issues, stream_info)
+    return FileHealthResult(
+        file_tier=file_tier,
+        file_issues=file_issues,
+        info=info,
+        content_hash=content_hash(filename),
+        stream_info=stream_info,
+    )
+
+
+@dataclass
+class TrackHealthResult:
+    track_tier: str | None
     track_issues: list[str]
     info: list[str]
     track_score: float | None
@@ -1502,21 +1631,18 @@ class AnalysisResult:
     is_mono_duplicated: bool | None
     has_mains_hum: bool | None
     peak_db: float | None
-    size_mismatch: SizeMismatch | None
 
 
-def _broken_result(filename: str, reason: str) -> AnalysisResult:
-    """A file ffmpeg can't decode at all is a real, persisted File Health
-    fact (`Broken`, terminal — Track Health is structurally impossible to
-    measure, not merely unmeasured), not a transient scan error. Only
-    `content_hash` can still be computed (it hashes raw bytes, no decode
-    needed) — everything else genuinely has nothing to report.
+def _broken_track_health_result(filename: str, reason: str, stream_info: StreamInfo) -> TrackHealthResult:
+    """Track Health is structurally impossible to measure on a file that
+    won't decode — a real, terminal outcome (`track_tier=None`), not
+    merely "not yet measured". `content_hash` and `stream_info` (from
+    ffprobe, which doesn't need a successful full decode) are kept —
+    everything that requires the decode itself is not.
     """
-    return AnalysisResult(
-        file_tier=FILE_TIER_BROKEN,
+    return TrackHealthResult(
         track_tier=None,
-        file_issues=[reason],
-        track_issues=[],
+        track_issues=[reason],
         info=[],
         track_score=None,
         content_hash=content_hash(filename),
@@ -1530,41 +1656,39 @@ def _broken_result(filename: str, reason: str) -> AnalysisResult:
         spectral_bandwidth_hz=None,
         noise_floor_db=None,
         stereo_coherence=None,
-        stream_info=StreamInfo(None, None, None, None, None),
+        stream_info=stream_info,
         is_out_of_phase=None,
         is_mono_duplicated=None,
         has_mains_hum=None,
         peak_db=None,
-        size_mismatch=None,
     )
 
 
-def analyze_file(
+def analyze_track_health(
     filename: str, ffmpeg_path: str | None = None, thresholds: Thresholds | None = None
-) -> AnalysisResult:
+) -> TrackHealthResult:
     """Runs on a background thread — real decode + measurement work, not
-    instant. Every whole-file measurement that doesn't depend on another
+    instant. Deliberately independent of analyze_file_health's own
+    (lighter) decode — see that function's docstring for why "separate
+    scans" means genuinely separate, not two views onto one shared pass.
+    Every whole-file measurement that doesn't depend on another
     measurement's result first runs in one merged ffmpeg invocation (see
-    _run_merged_analysis) — one decode instead of the 3-5 separate passes
-    this used to spawn. DR14 and hum detection now always run (unlike the
-    old OR-gate architecture, which skipped both once any gate had
-    already forced "Bad" — Track Health's weighted composite needs every
-    applicable check's real value, not a shortcut that made sense only
-    when a single fired gate already decided the whole file's fate).
+    _run_merged_analysis). DR14/hum/noise-floor always run (Track
+    Health's weighted composite needs every applicable check's real
+    value, not a shortcut for "already forced Bad" the way the old
+    OR-gate architecture had).
 
     `thresholds` defaults to the empirically-calibrated Thresholds()
     values when omitted — callers (the Options page sliders) override
     per scan rather than mutating module state, since scans may run
     concurrently across several files on Picard's background-thread pool.
 
-    Returns two independent tiers (see HANDOFF.md's "The redesign"):
-    File Health (structural, `result.file_tier`, never None) and Track
-    Health (perceptual, `result.track_tier`, None only when File Health
-    is `Broken` — a file that won't decode has nothing to measure
-    perceptually). `FfmpegNotFoundError`/`FfmpegVersionTooOldError` still
-    raise — an environment problem unrelated to any one file, not a
-    per-file verdict — but a decode failure on this specific file is now
-    a real persisted result (see _broken_result), not an exception.
+    `FfmpegNotFoundError`/`FfmpegVersionTooOldError` still raise; a
+    decode failure on this specific file is a real persisted
+    `track_tier=None` result (see _broken_track_health_result), not an
+    exception — mirrors analyze_file_health's own File Health verdict,
+    though this function makes no assumption a File Health scan of the
+    same file ever ran (fully independent scans, per design).
     """
     thresholds = thresholds or Thresholds()
     ffmpeg = find_ffmpeg(ffmpeg_path)
@@ -1589,63 +1713,23 @@ def analyze_file(
         sample_rate=stream_info.sample_rate,
     )
     if merged_returncode != 0:
-        # Every measurement in this module depends on the same decode
-        # succeeding — a non-zero exit means ffmpeg couldn't process the
-        # file at all (corrupt, truncated, not really audio despite the
-        # extension, or it hit the timeout).
-        return _broken_result(
+        return _broken_track_health_result(
             filename,
             f"ffmpeg couldn't decode {os.path.basename(filename)} as audio "
             "(corrupt, truncated, unsupported format, or a decode timeout)",
+            stream_info,
         )
     main_stderr = _filter_instance_output(merged_stderr, 'main')
     flat_factor, peak_db = _parse_astats(main_stderr)
     above_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'cutoff'))
     lufs, true_peak = _parse_loudnorm(merged_stderr)
-    # Informational only, for the compare panel's ranking — doesn't feed
-    # either tier (see BANDWIDTH_* constants for why this is a
-    # continuous, cause-agnostic estimate rather than a defect gate).
+    # Informational only, for the details panel's ranking — doesn't feed
+    # the tier (see BANDWIDTH_* constants for why this is a continuous,
+    # cause-agnostic estimate rather than a defect gate).
     spectral_bandwidth_hz = _measure_bandwidth(merged_stderr, stream_info.sample_rate, peak_db)
-    corruption_note = _detect_corruption_signature(merged_stderr)
-    size_mismatch = _detect_size_mismatch(filename)
 
-    file_issues: list[str] = []
     track_issues: list[str] = []
     info: list[str] = []
-
-    bitrate_note = _bitrate_transparency_note(stream_info)
-    if bitrate_note is not None:
-        info.append(bitrate_note)
-
-    if corruption_note is not None:
-        # A real decoder-level structural signal (see CORRUPTION_BITS_LEFT_
-        # PATTERN) — File Health, not merely informational, under the
-        # redesign: presence (not count, see that constant's own
-        # calibration note) is the validated signal.
-        file_issues.append(corruption_note)
-
-    if size_mismatch is not None:
-        declared_mb = size_mismatch.declared_bytes / 1_000_000
-        actual_mb = size_mismatch.actual_bytes / 1_000_000
-        if size_mismatch.direction == 'extra_data':
-            file_issues.append(
-                f"File has {size_mismatch.ratio * 100:.0f}% more audio data than its own VBR header "
-                f"accounts for ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
-                "consistent with extra data appended after the original track ended"
-            )
-        else:
-            file_issues.append(
-                f"File has {size_mismatch.ratio * 100:.0f}% less audio data than its own VBR header "
-                f"declares ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
-                "consistent with the file being truncated or rewritten after encoding"
-            )
-
-    if _detect_artwork_corruption(ffmpeg, ffprobe, filename):
-        file_issues.append("Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it")
-
-    tag_error = _detect_tag_structure_error(filename)
-    if tag_error is not None:
-        file_issues.append(f"Malformed tag structure — {tag_error}")
 
     has_clipping = flat_factor > thresholds.clip_flat_factor
     if has_clipping:
@@ -1731,17 +1815,13 @@ def analyze_file(
         if is_mono_duplicated:
             # Not a quality defect — a mono source duplicated into both
             # channels loses nothing, it's just wasteful. Informational,
-            # doesn't affect either tier.
+            # doesn't affect the tier.
             info.append("Left/right channels are identical (mono content in a stereo container)")
 
-    # Always measured now — Track Health's composite needs DR14/hum's
-    # real values regardless of what else fired, unlike the old OR-gate
-    # architecture where a file already forced "Bad" made these two
-    # extra passes not worth their cost.
     dr14 = _measure_dr14(ffmpeg, filename, stream_info.sample_rate)
     quiet_interval = _find_quiet_interval(ffmpeg, filename)
     hum_note = _detect_hum(ffmpeg, filename, quiet_interval)
-    has_mains_hum = hum_note is not None
+    has_mains_hum = hum_note is not None if quiet_interval is not None else None
     if hum_note is not None:
         track_issues.append(hum_note)
     noise_floor_db = _measure_noise_floor(ffmpeg, filename, quiet_interval)
@@ -1750,7 +1830,6 @@ def analyze_file(
     if dr14 is not None and dr14 < ok_threshold:
         track_issues.append(f"Compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
 
-    file_tier = _compute_file_tier(file_issues, stream_info)
     track_score = compute_track_score(
         TrackHealthInputs(
             flat_factor=flat_factor,
@@ -1761,16 +1840,14 @@ def analyze_file(
             spectral_energy_above_hires_cutoff_db=above_hires_cutoff_db,
             is_out_of_phase=is_out_of_phase,
             dr14=dr14,
-            has_mains_hum=has_mains_hum if quiet_interval is not None else None,
+            has_mains_hum=has_mains_hum,
         ),
         thresholds,
     )
     track_tier = track_tier_from_score(track_score) if track_score is not None else None
 
-    return AnalysisResult(
-        file_tier=file_tier,
+    return TrackHealthResult(
         track_tier=track_tier,
-        file_issues=file_issues,
         track_issues=track_issues,
         info=info,
         track_score=track_score,
@@ -1788,7 +1865,6 @@ def analyze_file(
         stream_info=stream_info,
         is_out_of_phase=is_out_of_phase,
         is_mono_duplicated=is_mono_duplicated,
-        has_mains_hum=has_mains_hum if quiet_interval is not None else None,
+        has_mains_hum=has_mains_hum,
         peak_db=peak_db,
-        size_mismatch=size_mismatch,
     )
