@@ -48,9 +48,23 @@ from picard.util.thread import run_task
 from . import analysis
 
 
-# Ordered worst-to-best, matches picard.ui.match_icons' 6 bookmark levels
-# and picard.file_health.analysis's tier names exactly.
-TIERS = ("Bad", "Poor", "Ok", "Good", "Great", "Excellent")
+# Ordered worst-to-best, matching analysis.py's FILE_TIER_*/track_tier_
+# from_score constants exactly. File Health has a terminal `Broken`
+# tier Track Health can't reach (a file that won't decode has nothing
+# to measure perceptually — see analysis.analyze_file's docstring).
+FILE_TIERS = ("Broken", "Bad", "Good", "Great", "Excellent")
+TRACK_TIERS = ("Bad", "Good", "Great", "Excellent")
+
+# picard.ui.match_icons ships 6 bookmark levels (0=worst red, 5=best
+# green). Mapped explicitly rather than evenly spread across all 6 so
+# the visual jump from a real defect (Bad) to a clean file (Good) stays
+# the same big red->green jump it was under the old 6-tier scale, with
+# only the top three tiers (Good/Great/Excellent) using the finer
+# upper-range distinctions. Track Health omits level 0 entirely — a
+# perceptual "Bad" is still a real defect, but nothing it measures is
+# as unambiguous as File Health's Broken (a file that won't even play).
+FILE_TIER_ICON_LEVEL = {"Broken": 0, "Bad": 1, "Good": 3, "Great": 4, "Excellent": 5}
+TRACK_TIER_ICON_LEVEL = {"Bad": 1, "Good": 3, "Great": 4, "Excellent": 5}
 
 
 class _NoWheelSlider(QtWidgets.QSlider):
@@ -402,19 +416,20 @@ def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thres
     """
     try:
         result = analysis.analyze_file(filename, ffmpeg_path=ffmpeg_path, thresholds=thresholds)
-    except (analysis.FfmpegNotFoundError, analysis.AnalysisError) as exc:
-        # FfmpegNotFoundError (incl. FfmpegVersionTooOldError): ffmpeg
-        # itself is missing/unusable — an environment problem, fixed in
-        # Options. AnalysisError: ffmpeg ran but couldn't process this
-        # specific file — every file scanned here is user-supplied and
-        # may be corrupt, truncated, or not really audio at all, so this
-        # is expected, not a bug. Either way: surfaced to the user below,
-        # never silently swallowed.
+    except analysis.FfmpegNotFoundError as exc:
+        # Includes FfmpegVersionTooOldError: ffmpeg itself is missing or
+        # unusable — an environment problem, fixed in Options, not a
+        # per-file result. A single specific file failing to decode is
+        # no longer an exception (see analysis.analyze_file's docstring)
+        # — it's the real `file_tier="Broken"` result handled below.
         return {'error': str(exc)}
     return {
-        'tier': result.tier,
-        'flags': "; ".join(result.issues),
+        'file_tier': result.file_tier,
+        'track_tier': result.track_tier,
+        'file_flags': "; ".join(result.file_issues),
+        'track_flags': "; ".join(result.track_issues),
         'info': "; ".join(result.info),
+        'track_score': result.track_score,
         'content_hash': result.content_hash,
         'bandwidth_hz': result.spectral_bandwidth_hz,
         'noise_floor_db': result.noise_floor_db,
@@ -492,12 +507,15 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
                 {'error': result['error']},
                 echo=None,
             )
-        elif 'tier' in result:
+        elif 'file_tier' in result:
             previous_hash = file.metadata['~health_content_hash']
             changed = bool(previous_hash) and previous_hash != result['content_hash']
-            file.metadata['~health_tier'] = result['tier']
-            file.metadata['~health_flags'] = result['flags']
+            file.metadata['~health_file_tier'] = result['file_tier']
+            file.metadata['~health_track_tier'] = result['track_tier'] or ''
+            file.metadata['~health_file_flags'] = result['file_flags']
+            file.metadata['~health_track_flags'] = result['track_flags']
             file.metadata['~health_info'] = result['info']
+            file.metadata['~health_track_score'] = _encode_metric(result['track_score'])
             file.metadata['~health_content_hash'] = result['content_hash']
             file.metadata['~health_changed_since_scan'] = '1' if changed else ''
             file.metadata['~health_bandwidth_hz'] = _encode_metric(result['bandwidth_hz'])
@@ -583,9 +601,10 @@ class HealthOptionsPage(OptionsPage):
         layout.addWidget(_section_header("File Health Sensitivity"))
         sensitivity_group, sensitivity_layout = _section_frame()
         sensitivity_intro = QtWidgets.QLabel(
-            "Any one check below can flag a file \"Bad\" on its own, even if it sounds fine "
-            "to you. Loosen a slider if it's flagging files that sound OK; tighten it if it's "
-            "missing real problems.",
+            "These sliders weight how much each check contributes to a file's Track Health "
+            "score — no single check can force a \"Bad\" verdict on its own anymore. Loosen a "
+            "slider if it's flagging files that sound OK to you; tighten it if it's missing "
+            "real problems.",
             self,
         )
         sensitivity_intro.setWordWrap(True)
@@ -604,7 +623,7 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addSpacing(8)
 
         self.spectral_silence_slider = _SensitivitySlider(
-            "Missing Treble", _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self, tag="TRB",
+            "Spectral Cutoff", _SPECTRAL_STEPS, _SPECTRAL_DEFAULT_INDEX, fmt="{:.0f} dB", parent=self, tag="TRB",
         )
         sensitivity_layout.addWidget(self.spectral_silence_slider)
         sensitivity_layout.addSpacing(8)
@@ -801,12 +820,21 @@ def _group_by_track(files: list[File]) -> dict[Track, list[File]]:
     return groups
 
 
-def _tier_rank(file: File) -> int:
-    """Higher is better; -1 means not yet scanned."""
+def _tier_rank(file: File) -> tuple[int, int]:
+    """Higher is better; (-1, -1) means not yet scanned. File Health
+    ranks first — a structural defect is a hard, objective fact that
+    should dominate a merely-perceptual Track Health difference between
+    otherwise-tied files, not average out against it.
+    """
     try:
-        return TIERS.index(file.metadata['~health_tier'])
+        file_rank = FILE_TIERS.index(file.metadata['~health_file_tier'])
     except ValueError:
-        return -1
+        return -1, -1
+    try:
+        track_rank = TRACK_TIERS.index(file.metadata['~health_track_tier'])
+    except ValueError:
+        track_rank = -1
+    return file_rank, track_rank
 
 
 def _read_metric(file: File, key: str) -> float | None:
@@ -912,11 +940,11 @@ _STATE_EMOJI: dict[str, str] = {'pass': '✅', 'amber': '⚠️', 'fail': '❌',
 
 # check label -> 3-4 letter tag matching its Options-page slider (see
 # HealthOptionsPage). Fake Hi-Res has no dedicated slider of its own — it
-# shares Missing Treble's spectral-silence threshold.
+# shares Spectral Cutoff's spectral-silence threshold.
 _CHECK_TAGS: dict[str, str] = {
     'Clipping': 'CLP',
     'True Peak': 'TPK',
-    'Missing Treble': 'TRB',
+    'Spectral Cutoff': 'TRB',
     'Out-of-Phase': 'PHS',
     'Fake Hi-Res': 'HRS',
 }
@@ -1005,7 +1033,7 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
             _read_metric(file, '~health_true_peak_dbtp'), True,
             thresholds.true_peak_dbtp, _TRUE_PEAK_STEPS, lambda v, t: v >= t, "dBTP", "Not yet measured.",
         ),
-        'Missing Treble': _gate_cell(
+        'Spectral Cutoff': _gate_cell(
             _read_metric(file, '~health_spectral_cutoff_db'), has_signal,
             thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
             "Near-silent file — not enough signal to measure high-frequency content.",
@@ -1069,12 +1097,13 @@ def _rank_cells(group: list[File], rank_weights: dict[str, int]) -> dict[File, d
 def _dr14_band_cell(file: File, thresholds: analysis.Thresholds, rank_weight: int) -> tuple[str, str]:
     """Dynamic Range's cell, unlike the three purely-relative ranking
     axes: DR14 has its own absolute Poor/Ok/Good/Great/Excellent band
-    (it's what actually decides Tier for gate-free files — see
-    analyze_file's own tier logic), so it's colored by that band, not
-    relative to whichever other files happen to be in this compare
-    group. Relative coloring would show "best in group" as green even
-    when every file compared is absolutely Poor — a real contradiction
-    with the Tier column, not just a cosmetic quibble.
+    (it's one weighted input into the Track Health composite score —
+    see analysis.compute_track_score/_dr14_score), so it's colored by
+    that band, not relative to whichever other files happen to be in
+    this compare group. Relative coloring would show "best in group"
+    as green even when every file compared is absolutely Poor — a
+    real contradiction with the Track Tier column, not just a
+    cosmetic quibble.
 
     The Comparison Priority weight still matters for tie-breaking among
     same-tier files (see _composite_winner), so it's noted in the
@@ -1212,8 +1241,8 @@ class CompareResultsPanel(QtWidgets.QDialog):
         layout.addLayout(scan_row)
 
         self.tree = QtWidgets.QTreeWidget(self)
-        full_names = ['File', 'Tier', 'Format'] + _CHECK_COLUMNS + ['Dynamic Range'] + _RANK_COLUMNS + ['Notes']
-        headers = ['File', 'Tier', 'Format']
+        full_names = ['File', 'File Tier', 'Track Tier', 'Format'] + _CHECK_COLUMNS + ['Dynamic Range'] + _RANK_COLUMNS + ['Notes']
+        headers = ['File', 'File Tier', 'Track Tier', 'Format']
         headers += [_CHECK_TAGS[c] for c in _CHECK_COLUMNS]
         headers += [_DR14_TAG]
         headers += [_RANK_COLUMN_INFO[c][2] for c in _RANK_COLUMNS]
@@ -1222,9 +1251,10 @@ class CompareResultsPanel(QtWidgets.QDialog):
         for col, full_name in enumerate(full_names):
             self.tree.headerItem().setToolTip(col, full_name)
         self.tree.setColumnWidth(0, 190)
-        self.tree.setColumnWidth(1, 80)
-        self.tree.setColumnWidth(2, 220)
-        for col in range(3, len(headers) - 1):
+        self.tree.setColumnWidth(1, 70)
+        self.tree.setColumnWidth(2, 70)
+        self.tree.setColumnWidth(3, 220)
+        for col in range(4, len(headers) - 1):
             self.tree.setColumnWidth(col, 55)
         self.tree.setColumnWidth(len(headers) - 1, 200)
         self.tree.setRootIsDecorated(True)
@@ -1286,11 +1316,12 @@ class CompareResultsPanel(QtWidgets.QDialog):
         header.setFont(0, italic)
         self.tree.addTopLevelItem(header)
 
-        unscanned = [f for f in group if not f.metadata['~health_tier']]
+        unscanned = [f for f in group if not f.metadata['~health_file_tier']]
         if unscanned:
             for file in group:
-                tier = file.metadata['~health_tier'] or "Not yet scanned"
-                item = QtWidgets.QTreeWidgetItem([file.base_filename, tier])
+                file_tier = file.metadata['~health_file_tier'] or "Not yet scanned"
+                track_tier = file.metadata['~health_track_tier'] or ("" if file.metadata['~health_file_tier'] else "Not yet scanned")
+                item = QtWidgets.QTreeWidgetItem([file.base_filename, file_tier, track_tier])
                 item.setData(0, _FILE_ROLE, file)
                 header.addChild(item)
             header.setExpanded(True)
@@ -1309,13 +1340,19 @@ class CompareResultsPanel(QtWidgets.QDialog):
         rank_cells_by_file = _rank_cells(group, self._rank_weights)
 
         for file in group:
-            tier = file.metadata['~health_tier']
+            file_tier = file.metadata['~health_file_tier']
+            # A Broken file has no Track Health to show (see
+            # analysis.analyze_file's docstring) — nothing to measure
+            # perceptually, not a blank "not yet scanned" state.
+            track_tier = file.metadata['~health_track_tier'] or (
+                "—" if file_tier == analysis.FILE_TIER_BROKEN else ""
+            )
             format_text, format_tooltip = _format_cell(file)
-            item = QtWidgets.QTreeWidgetItem([file.base_filename, tier, format_text])
-            item.setToolTip(2, format_tooltip)
+            item = QtWidgets.QTreeWidgetItem([file.base_filename, file_tier, track_tier, format_text])
+            item.setToolTip(3, format_tooltip)
             item.setData(0, _FILE_ROLE, file)
 
-            col = 3
+            col = 4
             check_cells = _check_cells(file, self._thresholds)
             for check_name in _CHECK_COLUMNS:
                 state, tooltip = check_cells[check_name]
@@ -1344,6 +1381,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
                 bold.setBold(True)
                 item.setFont(0, bold)
                 item.setFont(1, bold)
+                item.setFont(2, bold)
                 if len(top_files) > 1:
                     explanation = _rank_explanation(top_files, self._rank_weights)
                     if explanation:
@@ -1393,7 +1431,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         self.refresh()
 
     def _scan_unscanned(self) -> None:
-        self._run_scan([f for f in self._all_files() if not f.metadata['~health_tier']])
+        self._run_scan([f for f in self._all_files() if not f.metadata['~health_file_tier']])
 
     def _rescan_all(self) -> None:
         self._run_scan(self._all_files())
@@ -1402,7 +1440,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         files = self._all_files()
         self.rescan_all_button.setEnabled(bool(files))
         self.scan_unscanned_button.setEnabled(
-            any(not f.metadata['~health_tier'] for f in files)
+            any(not f.metadata['~health_file_tier'] for f in files)
         )
 
     def _current_file(self) -> File | None:
@@ -1578,8 +1616,9 @@ class CompareHealthAction(BaseAction):
     earlier: a perceptual-distance metric like ViSQOL/Zimtohrli would
     tell you the files differ, but not which one is better; the
     directional gate-field reasons and continuous fidelity axes (real,
-    from analysis.analyze_file, stored in ~health_flags and the
-    ~health_* metric fields) are what actually inform that judgment.
+    from analysis.analyze_file, stored in ~health_file_flags/
+    ~health_track_flags and the ~health_* metric fields) are what
+    actually inform that judgment.
     """
 
     TITLE = "Compare File Health…"
@@ -1624,34 +1663,49 @@ class CompareAllHealthAction(BaseAction):
 
 
 class HealthProvider(ColumnValueProvider, DelegateProvider):
-    """Column that displays health tier as a bookmark icon with an issues tooltip."""
+    """Column that displays both health tiers as a pair of bookmark icons
+    with an itemized-issues tooltip.
+    """
 
     def __init__(self) -> None:
         self._delegate_class = HealthColumnDelegate
 
     def evaluate(self, obj: Item) -> str:
-        """Return the tier index as a string, for sorting worst-to-best."""
+        """Combined sort key, worst-to-best: File Health rank first (a
+        structural defect is a harder, more objective fact than a
+        perceptual one — see _tier_rank), Track Health rank second.
+        Zero-padded so lexicographic (TEXT) sorting matches numeric
+        order for every rank pair.
+        """
         column_method = getattr(obj, 'column', None)
         if not callable(column_method):
             return "-1"
-        tier = column_method('~health_tier')
         try:
-            return str(TIERS.index(tier))
+            file_rank = FILE_TIERS.index(column_method('~health_file_tier'))
         except ValueError:
             return "-1"
+        try:
+            track_rank = TRACK_TIERS.index(column_method('~health_track_tier'))
+        except ValueError:
+            track_rank = -1
+        return f"{file_rank:02d}{track_rank + 1:02d}"
 
     def get_health_info(self, obj: Item) -> dict[str, object] | None:
         column_method = getattr(obj, 'column', None)
         if not callable(column_method):
             return None
-        tier = column_method('~health_tier')
-        if not tier:
+        file_tier = column_method('~health_file_tier')
+        if not file_tier:
             return None
-        stored_flags = column_method('~health_flags')
+        track_tier = column_method('~health_track_tier')
+        stored_file_flags = column_method('~health_file_flags')
+        stored_track_flags = column_method('~health_track_flags')
         stored_info = column_method('~health_info')
         return {
-            'tier': tier,
-            'issues': stored_flags.split("; ") if stored_flags else [],
+            'file_tier': file_tier,
+            'track_tier': track_tier or None,
+            'file_issues': stored_file_flags.split("; ") if stored_file_flags else [],
+            'track_issues': stored_track_flags.split("; ") if stored_track_flags else [],
             'info': stored_info.split("; ") if stored_info else [],
             'changed_since_scan': bool(column_method('~health_changed_since_scan')),
         }
@@ -1661,7 +1715,9 @@ class HealthProvider(ColumnValueProvider, DelegateProvider):
 
 
 class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
-    """Renders the health tier as a bookmark icon; hover shows every issue."""
+    """Renders both health tiers as a pair of bookmark icons (File Health
+    left, Track Health right); hover shows every issue from both.
+    """
 
     def _get_info(self, index: QtCore.QModelIndex) -> dict[str, object] | None:
         tree_widget = self.parent()
@@ -1697,33 +1753,46 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         info = self._get_info(index)
         if not info:
             return
-        try:
-            level = TIERS.index(info['tier'])
-        except ValueError:
-            return
-        icon = match_icons[level]
         icon_size = 16
         icon_margin = 2
-        x = option.rect.x() + icon_margin
         y = option.rect.y() + (option.rect.height() - icon_size) // 2
-        icon.paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
+        file_level = FILE_TIER_ICON_LEVEL.get(info['file_tier'])
+        if file_level is not None:
+            x = option.rect.x() + icon_margin
+            match_icons[file_level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
+        track_tier = info.get('track_tier')
+        track_level = TRACK_TIER_ICON_LEVEL.get(track_tier) if track_tier else None
+        if track_level is not None:
+            x = option.rect.x() + icon_margin * 2 + icon_size
+            match_icons[track_level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
 
     def _format_tooltip(self, info: dict[str, object]) -> str:
-        tier = info['tier']
-        issues = info['issues']
-        notes = info.get('info') or []
-        parts = [f"<b>{tier}</b>"]
+        file_tier = info['file_tier']
+        track_tier = info.get('track_tier')
+        parts = [f"<b>File Health: {file_tier}</b>"]
         if info.get('changed_since_scan'):
             parts.append(
                 "<div style='color:#b7950b;'>Audio content changed since last scan</div>"
             )
-        if issues:
-            items = "".join(f"<li>{issue}</li>" for issue in issues)
+        file_issues = info['file_issues']
+        if file_issues:
+            items = "".join(f"<li>{issue}</li>" for issue in file_issues)
             parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
         else:
-            parts.append("<br>No issues detected")
+            parts.append("<br>No structural defects")
+        if track_tier is None:
+            parts.append("<br><b>Track Health: not measured</b> — file won't decode")
+        else:
+            parts.append(f"<br><b>Track Health: {track_tier}</b>")
+            track_issues = info['track_issues']
+            if track_issues:
+                items = "".join(f"<li>{issue}</li>" for issue in track_issues)
+                parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
+            else:
+                parts.append("<br>No perceptible issues")
+        notes = info.get('info') or []
         if notes:
-            # Informational only — doesn't affect the tier (e.g. mono
+            # Informational only — doesn't affect either tier (e.g. mono
             # content in a stereo container isn't a defect, just a note).
             note_items = "".join(f"<li>{note}</li>" for note in notes)
             parts.append(
@@ -1749,7 +1818,7 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ) -> QtCore.QSize:
-        return QtCore.QSize(70, 20)
+        return QtCore.QSize(90, 20)
 
 
 # Registered at import time, not inside enable(), to match how Picard's own
@@ -1758,10 +1827,10 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
 # plugin enable() apparently runs too late for.
 _HEALTH_COLUMN = make_delegate_column(
     "Health",
-    '~health_tier',
+    '~health_combined_tier',
     HealthProvider(),
-    width=70,
-    size=QtCore.QSize(60, 16),
+    width=90,
+    size=QtCore.QSize(80, 16),
 )
 _HEALTH_COLUMN.is_default = True
 registry.register(_HEALTH_COLUMN, add_to={'FILE_VIEW', 'ALBUM_VIEW'})
@@ -1804,18 +1873,28 @@ def enable(api: PluginApi) -> None:
     # own bookmark icons (not new plugin-bundled assets) needs this.
     load_match_icons()
     api.register_script_variable(
-        '_health_tier',
-        documentation="Health tier from the last scan (Bad..Excellent).",
-        title="Health",
+        '_health_file_tier',
+        documentation="File Health tier from the last scan (Broken/Bad/Good/Great/Excellent).",
+        title="File Health",
     )
     api.register_script_variable(
-        '_health_flags',
-        documentation="Itemized list of issues found by the last scan.",
-        title="Health flags",
+        '_health_track_tier',
+        documentation="Track Health tier from the last scan (Bad/Good/Great/Excellent); empty if the file is Broken.",
+        title="Track Health",
+    )
+    api.register_script_variable(
+        '_health_file_flags',
+        documentation="Itemized list of structural (File Health) issues found by the last scan.",
+        title="File Health flags",
+    )
+    api.register_script_variable(
+        '_health_track_flags',
+        documentation="Itemized list of perceptual (Track Health) issues found by the last scan.",
+        title="Track Health flags",
     )
     api.register_script_variable(
         '_health_info',
-        documentation="Informational notes that don't affect the health tier (e.g. mono content in a stereo container).",
+        documentation="Informational notes that don't affect either health tier (e.g. mono content in a stereo container).",
         title="Health info",
     )
     api.register_script_variable(
