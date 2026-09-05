@@ -1,24 +1,26 @@
-# Handoff — File Health plugin, near-complete rewrite in progress (session 2)
+# Handoff — File Health plugin, two-tier rewrite COMPLETE (as of session 3)
 
-Two sessions in on this rewrite now. The first hit a context limit mid-
-redesign (see "The redesign" section below — still accurate, nothing there
-changed). This second session finished the first item of that session's own
-build plan (the two new File Health checks) with full real-data validation,
-then stopped at a clean checkpoint rather than rush the much larger
-remaining scope (calibrated weighted scoring + a full UI rewrite) — see
-"Session 2 progress" below for what changed and why, and the revised build
-plan at the bottom for exactly where to resume.
+**The rewrite described in this document is done and verified**, not in
+progress. Three sessions total: session 1 designed the two-tier redesign
+(see "The redesign" below) and hit a context limit before implementing it;
+session 2 built and validated the two new File Health checks; session 3
+(this one) built both scoring engines, rewrote `analyze_file`, split the
+metadata schema, rewrote both UI surfaces (tree column, compare-matrix),
+updated the Options page copy, and calibrated Track Health's tier
+boundaries against real data. Every item in session 2's "Concrete build
+plan" is done. See "Session 3 — rewrite complete" below for exactly what
+changed and how it was verified before treating anything below that as
+historical background rather than current state.
 
 **Repo**: `~/Documents/code_repo/picard-file-health`, own git repo.
-**HEAD**: `463effe` "Add two new File Health structural checks: Xing-header
-size mismatch, non-audio corruption" — working tree clean, nothing
-uncommitted.
-**Do not assume anything about `analysis.py`'s tier logic beyond what's
-described here is still correct** — this doc describes what ships at HEAD
-*and* the redesign that supersedes big parts of it. The two new checks
-*are* wired into the current (still single-tier, still-being-replaced)
-`analyze_file()` as ordinary `issues` entries; they'll get recategorized
-as pure File Health inputs, not rewritten, once the two-tier scorer lands.
+**HEAD**: `1d77889` "Calibrate Track Health tier boundaries against real
+80-file sample; docstring polish" — working tree clean, nothing
+uncommitted. Installed and confirmed loading cleanly in a real running
+Picard instance at this exact commit (see verification section).
+**`analysis.py`'s tier logic at HEAD is the real, current, two-tier
+architecture** — `AnalysisResult.file_tier`/`.track_tier`, not the old
+single `.tier` this doc's older sections still describe when talking
+about "gates". Read "Session 3 — rewrite complete" first.
 
 ## What this is
 
@@ -35,6 +37,90 @@ below) for deciding which copy of a matched recording is better.
   library tonight (see "Real test corpus" below), plus `BADNESS_MANIFEST.json`
   describing why each one was flagged. Use these for regression testing new
   heuristics — they're real, not synthetic.
+
+## Session 3 — rewrite complete
+
+Every step of session 2's build plan is done, in order:
+
+1. **Two new File Health checks** — done in session 2 (Xing-header size
+   mismatch, non-audio corruption).
+2. **Track Health composite scorer** (`analysis.py`: `CLIP_STEPS`/
+   `TRUE_PEAK_STEPS`/`SPECTRAL_STEPS`/`PHASE_STEPS`, `_step_score`,
+   `_dr14_score`, `TRACK_HEALTH_WEIGHTS`, `TrackHealthInputs`,
+   `compute_track_score`, `track_tier_from_score`). Weighted average in
+   0..1 across Clipping/Spectral Cutoff/Out-of-Phase/DR14 (weight 1.0),
+   True Peak/Fake Hi-Res (weight 0.3, confirmed with the user — folds in
+   as a normal low-weight input, not a separate bucket), Mains Hum
+   (weight 0.5). Tier boundaries calibrated against a real 80-file
+   sample from the `master` corpus: `TRACK_HEALTH_BAD_THRESHOLD = 0.35`,
+   `_GOOD = 0.25`, `_GREAT = 0.15` — see the constant's own comment for
+   the full percentile breakdown and why (no sharp natural gap in the
+   real distribution, so placed by percentile + inspecting what
+   actually drove the top-scoring real files: compounding True Peak +
+   mains hum + heavy DR compression, not a single borderline reading).
+3. **File Health composite scorer** (`analysis.py`: `_compute_file_tier`).
+   No sliders, per the redesign: `Bad` if any structural defect present
+   (bits_left corruption, non-audio corruption, Xing-header size
+   mismatch) regardless of bitrate; otherwise graded by codec/bitrate
+   transparency (lossless→`Excellent`, transparent-bitrate lossy→
+   `Great`, below-transparent lossy→`Good`).
+4. **Decode failure reclassified**: `_broken_result` returns a real
+   `file_tier="Broken"`/`track_tier=None` `AnalysisResult` instead of
+   raising. `AnalysisError` class removed entirely (dead code — nothing
+   raises it anymore). `FfmpegNotFoundError`/`FfmpegVersionTooOldError`
+   still raise, unchanged (environment problems, not per-file).
+5. **`analyze_file` rewritten**: splits `file_issues`/`track_issues`
+   per the check-categorization table above; DR14/hum/noise-floor now
+   *always* measured (the old OR-gate's "skip if already Bad" shortcut
+   no longer makes sense — Track Health's composite needs every
+   applicable check's real value regardless of File Health's verdict).
+6. **Metadata schema split**: `~health_tier`/`~health_flags` →
+   `~health_file_tier`/`~health_track_tier`/`~health_file_flags`/
+   `~health_track_flags`. No migration shim — these are Picard `~`
+   hidden/computed tags, never written to actual file tags on disk, so
+   there's nothing on a user's library to migrate; a file just needs a
+   rescan to get the new schema, same as any other metric change.
+7. **Tree column UI**: `HealthColumnDelegate` now paints two bookmark
+   icons side by side (File Health left, Track Health right) in the
+   same column, combined tooltip breaking out both tiers' issues
+   separately. `FILE_TIER_ICON_LEVEL`/`TRACK_TIER_ICON_LEVEL` map onto
+   `match_icons`' 6 levels. Visually verified via offscreen Qt
+   rendering (`QT_QPA_PLATFORM=offscreen`, `import picard.resources`
+   to register icons outside the real app, `tree.grab()` → PNG) across
+   every tier combination — screenshots confirmed correct red→green
+   icon pairs, including the Broken case (single icon, no second one).
+8. **Compare-matrix UI**: `Tier` column → `File Tier` + `Track Tier`
+   columns; `_tier_rank` returns `(file_rank, track_rank)` — File
+   Health ranks first when picking a group's winner (a structural
+   defect is a harder fact than a perceptual one). Visually verified
+   offscreen against two real scanned files (Ray Price: Bad/Great;
+   Korn: Good/Good, correctly bolded as the group winner).
+9. **Options page copy**: sensitivity-sliders intro rewritten (the old
+   "any one check can flag Bad on its own" claim is gone — replaced
+   with the actual weighted-scoring framing). `Missing Treble` slider
+   label and every message string renamed `Spectral Cutoff` throughout
+   both files.
+
+**Verification performed** (see commit `f4b6ff3`/`1d77889` messages for
+full detail): headless module import; full `_scan_one`/`_scan_finished`
+round trip against a real fixture with metadata assertions; `HealthProvider`
+sort-key and tooltip output checked directly; both UI surfaces rendered
+offscreen and visually inspected; full regression across all 22 real
+`assets/` fixtures (0 errors, tiers span all four Track Health levels and
+both Bad/non-Bad File Health outcomes); **installed into a real running
+Picard instance via `picard-cli --reinstall`, byte-diff confirmed against
+the installed copy, and the live app's own log confirmed `File Health
+enabled` with no traceback** at both `f4b6ff3` and the final `1d77889`.
+
+**Known follow-up, not blocking**: the 80-file Track Health calibration
+sample is modest — worth re-checking against a larger/more diverse sample
+(other corpora, not just `master`) if the tier distribution ever looks off
+in real use. The Options-page step-tables (`_CLIP_STEPS` etc. in
+`__init__.py`, with UI hint text) still duplicate `analysis.py`'s plain
+scoring copies (`CLIP_STEPS` etc.) — same calibrated values, kept as two
+copies because they serve different structures (hint-bearing tuples for
+the slider UI vs. plain floats for scoring) rather than merged under time
+pressure; a future pass could unify them if the duplication ever drifts.
 
 ## Dev loop
 
