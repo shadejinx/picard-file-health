@@ -607,19 +607,17 @@ class HealthOptionsPage(OptionsPage):
     def __init__(self) -> None:
         super().__init__()
         layout = QtWidgets.QVBoxLayout(self)
-        help_row = QtWidgets.QHBoxLayout()
-        help_button = QtWidgets.QPushButton("Help \u2014 How File Health Works\u2026", self)
+        title_row = QtWidgets.QHBoxLayout()
+        title_row.addWidget(_section_header("File Health"))
+        title_row.addStretch(1)
+        help_button = QtWidgets.QPushButton("Help", self)
         help_button.clicked.connect(self._show_help)
-        help_row.addWidget(help_button)
-        help_row.addStretch(1)
-        layout.addLayout(help_row)
+        title_row.addWidget(help_button)
+        layout.addLayout(title_row)
         self.auto_scan_checkbox = QtWidgets.QCheckBox("Automatically scan File Health for newly added files", self)
         layout.addWidget(self.auto_scan_checkbox)
         auto_scan_detail = QtWidgets.QLabel(
-            "Runs the same quick check as the manual \"Scan File Health…\" action, just "
-            "automatically. Track Health's slower, more detailed scan always stays manual "
-            "— use \"Scan Track Health…\" from the right-click menu, or the File Health "
-            "Details window.",
+            "Track Health always needs a manual scan \u2014 see Help for details.",
             self,
         )
         auto_scan_detail.setWordWrap(True)
@@ -657,10 +655,7 @@ class HealthOptionsPage(OptionsPage):
         layout.addWidget(_section_header("Track Health Sensitivity"))
         sensitivity_group, sensitivity_layout = _section_frame()
         sensitivity_intro = QtWidgets.QLabel(
-            "These sliders weight how much each check contributes to a file's Track Health "
-            "score — no single check can force a \"Bad\" verdict on its own anymore. Loosen a "
-            "slider if it's flagging files that sound OK to you; tighten it if it's missing "
-            "real problems.",
+            "Loosen a slider to reduce false positives, tighten it to catch more.",
             self,
         )
         sensitivity_intro.setWordWrap(True)
@@ -772,18 +767,12 @@ class HealthOptionsPage(OptionsPage):
         version = analysis.get_ffmpeg_version(resolved)
         min_version = '.'.join(map(str, analysis.MINIMUM_FFMPEG_VERSION))
         if version is None:
-            self.ffmpeg_status_label.setText(
-                f"Found: {resolved} (version could not be determined — scans will "
-                "still be attempted)"
-            )
+            self.ffmpeg_status_label.setText(f"Found: {resolved} (version unknown \u2014 scanning anyway)")
         elif version < analysis.MINIMUM_FFMPEG_VERSION:
             found = '.'.join(map(str, version))
             self.ffmpeg_status_label.setText(
-                "<div style='color:#c0392b;'>Found: "
-                f"{resolved} (ffmpeg {found} — <b>too old</b>. File Health needs "
-                f"ffmpeg {min_version} or newer to run its checks; scans with this "
-                "version will fail with an explanatory error. Use Get ffmpeg… below "
-                "for a current build.)</div>"
+                f"<span style='color:#c0392b;'>{resolved} is ffmpeg {found} \u2014 too old, needs "
+                f"{min_version}+. Use Get ffmpeg\u2026 below.</span>"
             )
         else:
             found = '.'.join(map(str, version))
@@ -947,27 +936,28 @@ def _gate_cell(
     pass_reason: str,
 ) -> tuple[str, str]:
     """One gate check's cell: (state, tooltip). `fail_reason`/`pass_reason`
-    are plain-language explanations of what this measurement actually
-    means for the audio (e.g. "Audio is clipped — pushed past full volume
-    and distorted"), not just the raw number versus the threshold — a
-    number alone doesn't tell a general user why it matters. Amber means
-    "would fail if the matching Options-page slider moved one notch
-    stricter" — reuses the slider's own calibrated steps rather than a
-    new invented margin, so the amber band moves live with the slider
-    instead of sitting at a fixed offset unrelated to what the user
-    actually configured.
+    are short, plain-language explanations of what this measurement
+    actually means for the audio (e.g. "Clipped, sound is distorted"),
+    not just the raw number versus the threshold — a number alone
+    doesn't tell a general user why it matters. Keep both under a
+    handful of words; the numeric value/threshold gets appended
+    automatically. Amber means "would fail if the matching Options-page
+    slider moved one notch stricter" — reuses the slider's own
+    calibrated steps rather than a new invented margin, so the amber
+    band moves live with the slider instead of sitting at a fixed
+    offset unrelated to what the user actually configured.
     """
     if not applies or value is None:
         return 'na', na_reason
     if fails(value, current):
-        return 'fail', f"{fail_reason} ({value:.1f}{unit}, past the {current:.1f}{unit} threshold)."
+        return 'fail', f"{fail_reason} ({value:.1f}{unit}, past {current:.1f}{unit})."
     next_stricter = _next_stricter_step(steps, current)
     if next_stricter is not None and fails(value, next_stricter):
         return 'amber', (
-            f"{pass_reason} ({value:.1f}{unit}), but only just — one slider notch stricter "
-            f"({next_stricter:.1f}{unit}) would flag this file."
+            f"{pass_reason} ({value:.1f}{unit}) \u2014 one notch stricter "
+            f"({next_stricter:.1f}{unit}) would flag it."
         )
-    return 'pass', f"{pass_reason} ({value:.1f}{unit}, comfortably clear of the {current:.1f}{unit} threshold)."
+    return 'pass', f"{pass_reason} ({value:.1f}{unit}, clear of {current:.1f}{unit})."
 
 
 def _is_live_context(file: File) -> bool:
@@ -1002,57 +992,48 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
         'Clipping': _gate_cell(
             _read_metric(file, '~health_clip_flat_factor'), True,
             thresholds.clip_flat_factor, _CLIP_STEPS, lambda v, t: v > t, "", "Not yet measured.",
-            "Audio is clipped — pushed past full volume and distorted",
-            "No clipping detected — audio stays cleanly under full volume",
+            "Clipped, sound is distorted",
+            "No clipping detected",
         ),
         'True Peak': _gate_cell(
             _read_metric(file, '~health_true_peak_dbtp'), True,
             thresholds.true_peak_dbtp, _TRUE_PEAK_STEPS, lambda v, t: v >= t, "dB", "Not yet measured.",
-            "Peaks between samples overshoot full volume — can distort on some playback equipment "
-            "even though no single sample clips",
-            "Peaks stay safely under full volume, including the overshoot that happens between samples",
+            "Peaks overshoot between samples, may distort on playback",
+            "Peaks stay safely under full volume",
         ),
         'Spectral Cutoff': _gate_cell(
             _read_metric(file, '~health_spectral_cutoff_db'), has_signal,
             thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
-            "Near-silent file — not enough signal to measure high-frequency content.",
-            "No real sound above the cutoff frequency — likely converted from a lossy file (like an MP3) "
-            "at some point" + (
-                ", though a live recording's PA system or broadcast feed can also naturally roll off "
-                "high frequencies without any lossy transcoding involved" if _is_live_context(file) else ""
+            "Too quiet to measure.",
+            "No sound above the cutoff, likely from a lossy source" + (
+                " (or live PA/broadcast roll-off)" if _is_live_context(file) else ""
             ),
-            "Real high-frequency content extends above the cutoff, consistent with a genuine full-bandwidth source",
+            "High-frequency content present, consistent with a full-bandwidth source",
         ),
         'Fake Hi-Res': _gate_cell(
             _read_metric(file, '~health_hires_cutoff_db'), is_hires and has_signal,
             thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
-            "Not a hi-res-rate file — check doesn't apply." if not is_hires else
-            "Near-silent file — not enough signal to measure.",
-            "Labeled as hi-res audio but has no real content above the check frequency — likely stretched "
-            "up from an ordinary file rather than genuine hi-res",
-            "Real content exists above the check frequency, consistent with genuine hi-res audio",
+            "Not a hi-res-rate file." if not is_hires else "Too quiet to measure.",
+            "No content above the hi-res frequency, likely upsampled",
+            "Real content confirmed above the check frequency",
         ),
         'Noise Floor': _gate_cell(
             _read_metric(file, '~health_noise_floor_db'), True,
             thresholds.noise_floor_db, _NOISE_FLOOR_STEPS, lambda v, t: v >= t, "dB",
-            "Not yet measured, or the file has no quiet passage to measure.",
-            "Background noise (hiss/static) is audible in the quietest passage — likely left over from an "
-            "analog transfer or a noisy recording environment" + (
-                ", though audience and room noise on a live recording is often the real cause rather than "
-                "a bad transfer" if _is_live_context(file) else ""
+            "Not measured, or no quiet passage found.",
+            "Audible background noise in quiet passages" + (
+                " (or live audience/room noise)" if _is_live_context(file) else ""
             ),
-            "Quiet passages are close to silent, with no audible background noise",
+            "Quiet passages are clean",
         ),
     }
     is_out_of_phase = _decode_bool(file.metadata['~health_is_out_of_phase'])
     if channels is not None and channels < 2:
-        cells['Out-of-Phase'] = ('na', "Mono file — no second channel to compare.")
+        cells['Out-of-Phase'] = ('na', "Mono file \u2014 no second channel.")
     elif is_out_of_phase is None:
         cells['Out-of-Phase'] = ('na', "Not yet measured.")
     elif is_out_of_phase:
-        cells['Out-of-Phase'] = (
-            'fail', "Left and right channels cancel out — will sound hollow or vanish entirely on mono speakers."
-        )
+        cells['Out-of-Phase'] = ('fail', "Channels cancel out \u2014 sounds hollow on mono speakers.")
     else:
         cells['Out-of-Phase'] = ('pass', "Channels are correlated normally.")
     return cells
@@ -1208,10 +1189,10 @@ class DetailsPanel(QtWidgets.QDialog):
 
         scan_row = QtWidgets.QHBoxLayout()
         self.scan_file_health_button = QtWidgets.QPushButton("Scan File Health", self)
-        self.scan_file_health_button.setToolTip("Scan every file below for File Health — checks the file itself for damage or corruption.")
+        self.scan_file_health_button.setToolTip("Checks every file below for structural damage or corruption.")
         self.scan_file_health_button.clicked.connect(self._scan_file_health)
         self.scan_track_health_button = QtWidgets.QPushButton("Scan Track Health", self)
-        self.scan_track_health_button.setToolTip("Scan every file below for Track Health — checks how the audio actually sounds.")
+        self.scan_track_health_button.setToolTip("Checks every file below for how it actually sounds.")
         self.scan_track_health_button.clicked.connect(self._scan_track_health)
         scan_row.addWidget(self.scan_file_health_button)
         scan_row.addWidget(self.scan_track_health_button)
@@ -1243,11 +1224,7 @@ class DetailsPanel(QtWidgets.QDialog):
         self.show_button = QtWidgets.QPushButton("Show in List", self)
         self.show_button.clicked.connect(self._show_in_list)
         self.spectrogram_button = QtWidgets.QPushButton("Spectrogram…", self)
-        self.spectrogram_button.setToolTip(
-            "Show a visual picture of the sound — an easy way to spot problems like a "
-            "missing top end, background noise, or an unbalanced left/right mix, rather "
-            "than trusting a single number."
-        )
+        self.spectrogram_button.setToolTip("Visual picture of the sound \u2014 spot cutoffs, noise, or imbalance at a glance.")
         self.spectrogram_button.clicked.connect(self._show_spectrogram)
         self.remove_button = QtWidgets.QPushButton("Remove from Picard", self)
         self.remove_button.clicked.connect(self._remove_from_picard)
