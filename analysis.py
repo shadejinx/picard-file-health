@@ -185,6 +185,23 @@ TRUE_PEAK_THRESHOLD_DBTP = 0.6
 # inherited from ffmpeg's own defaults.
 PHASE_OUT_OF_PHASE_ANGLE_DEG = 170.0
 
+# Broadband RMS level (dB) in a track's own quietest passage at or above
+# this counts as audible background noise (hiss, hum-adjacent static,
+# mastering-chain self-noise) rather than the near-silence a clean
+# quiet passage should show. Calibrated against this project's own
+# 19-fixture real-track sample (see _measure_noise_floor): measured
+# noise floors ranged -66.4dB (a clean, quiet acoustic passage) to
+# -37.5dB (the noisiest real file in the sample), clustering -40 to
+# -55dB for ordinary commercial masters. -35dB sits just above every
+# file in that sample — a real elevated noise floor (tape hiss on an
+# analog transfer, a poor digitization, mic self-noise) should read
+# well above this, while an ordinary clean master's quietest passage
+# (which still carries some reverb tail/room tone, not true silence)
+# won't false-positive. Narrower sample than the True Peak/Clipping
+# gates' 500-750-file validation — worth widening if real-world use
+# turns up false positives or misses.
+NOISE_FLOOR_THRESHOLD_DB = -35.0
+
 
 @dataclass
 class Thresholds:
@@ -219,6 +236,7 @@ class Thresholds:
     spectral_silence_db: float = SPECTRAL_SILENCE_THRESHOLD_DB
     phase_angle_deg: float = PHASE_OUT_OF_PHASE_ANGLE_DEG
     dr14_shift: float = 0.0
+    noise_floor_db: float = NOISE_FLOOR_THRESHOLD_DB
 
 
 # --- Track Health: weighted composite scoring ---
@@ -243,6 +261,7 @@ CLIP_STEPS: tuple[float, ...] = (25.0, 20.0, 16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.1,
 TRUE_PEAK_STEPS: tuple[float, ...] = (3.0, 2.0, 1.5, 1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.0)
 SPECTRAL_STEPS: tuple[float, ...] = (-90.0, -85.0, -75.0, -65.0, -60.0, -55.0, -50.0, -45.0, -35.0, -30.0)
 PHASE_STEPS: tuple[float, ...] = (179.0, 177.0, 174.0, 170.0, 165.0, 158.0, 150.0, 140.0, 120.0, 95.0)
+NOISE_FLOOR_STEPS: tuple[float, ...] = (-20.0, -25.0, -30.0, -35.0, -40.0, -42.5, -45.0, -47.5, -50.0, -55.0)
 
 
 def _step_score(value: float, steps: tuple[float, ...], fails: Callable[[float, float], bool]) -> float:
@@ -285,7 +304,11 @@ def _dr14_score(dr14: int, dr14_shift: float) -> float:
 # limit — see TRUE_PEAK_THRESHOLD_DBTP). Mains Hum is similarly
 # downweighted: its own docstring already calls it "strong likelihood,
 # not a definitive measurement" (can't fully rule out a real sustained
-# musical drone at the same frequency). Clipping/Spectral Cutoff/
+# musical drone at the same frequency). Noise Floor gets the same
+# downweight: a raised reading in a track's quietest passage can be a
+# genuine transfer/mastering defect, but can equally be real content
+# (room tone on a live recording, a reverb tail) that "quiet passage"
+# RMS can't tell apart from actual noise. Clipping/Spectral Cutoff/
 # Out-of-Phase/DR14 are direct, high-confidence measurements of the
 # decoded signal and get full weight.
 TRACK_HEALTH_WEIGHTS: dict[str, float] = {
@@ -296,6 +319,7 @@ TRACK_HEALTH_WEIGHTS: dict[str, float] = {
     'true_peak': 0.3,
     'fake_hires': 0.3,
     'mains_hum': 0.5,
+    'noise_floor': 0.5,
 }
 
 
@@ -309,8 +333,10 @@ TRACK_HEALTH_WEIGHTS: dict[str, float] = {
 # *compounding* pattern (True Peak overs + audible mains hum + a
 # heavily compressed DR5-DR8 master, all at once) from the broad
 # middle; 0.15 (bottom ~8%) separated the cleanest files (no hum, high
-# DR, no true-peak overs). Yields Excellent 7.5% / Great 30% / Good
-# 56% / Bad 6% on the calibration sample — Bad reserved for real,
+# DR, no true-peak overs). Yields Excellent 7.5% / Good 30% / OK
+# 56% / Bad 6% on the calibration sample (tier names below the old
+# Great/Good, renamed Good/OK — see track_tier_from_score) — Bad
+# reserved for real,
 # multi-factor degradation, not a single borderline reading, matching
 # this redesign's whole reason for existing (see HANDOFF.md's "The
 # redesign").
@@ -323,9 +349,9 @@ def track_tier_from_score(score: float) -> str:
     if score >= TRACK_HEALTH_BAD_THRESHOLD:
         return "Bad"
     if score >= TRACK_HEALTH_GOOD_THRESHOLD:
-        return "Good"
+        return "OK"
     if score >= TRACK_HEALTH_GREAT_THRESHOLD:
-        return "Great"
+        return "Good"
     return "Excellent"
 
 
@@ -1410,11 +1436,10 @@ def _run_corruption_decode(ffmpeg: str, filename: str) -> tuple[str, int]:
     )
     return proc.stderr, proc.returncode
 
-
-FILE_TIER_BROKEN = "Broken"
+FILE_TIER_BROKEN = "Unplayable"
 FILE_TIER_BAD = "Bad"
-FILE_TIER_GOOD = "Good"
-FILE_TIER_GREAT = "Great"
+FILE_TIER_GOOD = "OK"
+FILE_TIER_GREAT = "Good"
 FILE_TIER_EXCELLENT = "Excellent"
 
 
@@ -1468,6 +1493,23 @@ class TrackHealthInputs:
     is_out_of_phase: bool | None
     dr14: int | None
     has_mains_hum: bool | None
+    noise_floor_db: float | None
+
+
+def _anchored_steps(steps: tuple[float, ...], default: float, current: float) -> tuple[float, ...]:
+    """Translates a calibrated lenient->strict STEPS scale so its
+    default-anchored position lines up with the user's actual chosen
+    threshold, preserving the scale's own relative spacing (each step's
+    distance from the next stays exactly what real calibration data
+    validated — see the STEPS tuples' own comments) while letting the
+    Options-page sensitivity sliders genuinely move the Track Health
+    score, not just which issues get listed as text. A no-op when the
+    user hasn't touched the slider (current == default).
+    """
+    if current == default:
+        return steps
+    delta = current - default
+    return tuple(step + delta for step in steps)
 
 
 def compute_track_score(inputs: TrackHealthInputs, thresholds: Thresholds) -> float | None:
@@ -1482,16 +1524,20 @@ def compute_track_score(inputs: TrackHealthInputs, thresholds: Thresholds) -> fl
     """
     contributions: list[tuple[float, float]] = []
     if inputs.flat_factor is not None:
-        score = _step_score(inputs.flat_factor, CLIP_STEPS, lambda v, t: v > t)
+        steps = _anchored_steps(CLIP_STEPS, MIN_FLAT_FACTOR_FOR_CLIPPING, thresholds.clip_flat_factor)
+        score = _step_score(inputs.flat_factor, steps, lambda v, t: v > t)
         contributions.append((score, TRACK_HEALTH_WEIGHTS['clipping']))
     if inputs.true_peak_dbtp is not None:
-        score = _step_score(inputs.true_peak_dbtp, TRUE_PEAK_STEPS, lambda v, t: v >= t)
+        steps = _anchored_steps(TRUE_PEAK_STEPS, TRUE_PEAK_THRESHOLD_DBTP, thresholds.true_peak_dbtp)
+        score = _step_score(inputs.true_peak_dbtp, steps, lambda v, t: v >= t)
         contributions.append((score, TRACK_HEALTH_WEIGHTS['true_peak']))
     if inputs.has_signal and inputs.spectral_energy_above_cutoff_db is not None:
-        score = _step_score(inputs.spectral_energy_above_cutoff_db, SPECTRAL_STEPS, lambda v, t: v < t)
+        steps = _anchored_steps(SPECTRAL_STEPS, SPECTRAL_SILENCE_THRESHOLD_DB, thresholds.spectral_silence_db)
+        score = _step_score(inputs.spectral_energy_above_cutoff_db, steps, lambda v, t: v < t)
         contributions.append((score, TRACK_HEALTH_WEIGHTS['spectral_cutoff']))
     if inputs.is_hires and inputs.has_signal and inputs.spectral_energy_above_hires_cutoff_db is not None:
-        score = _step_score(inputs.spectral_energy_above_hires_cutoff_db, SPECTRAL_STEPS, lambda v, t: v < t)
+        steps = _anchored_steps(SPECTRAL_STEPS, SPECTRAL_SILENCE_THRESHOLD_DB, thresholds.spectral_silence_db)
+        score = _step_score(inputs.spectral_energy_above_hires_cutoff_db, steps, lambda v, t: v < t)
         contributions.append((score, TRACK_HEALTH_WEIGHTS['fake_hires']))
     if inputs.is_out_of_phase is not None:
         contributions.append((1.0 if inputs.is_out_of_phase else 0.0, TRACK_HEALTH_WEIGHTS['out_of_phase']))
@@ -1499,6 +1545,10 @@ def compute_track_score(inputs: TrackHealthInputs, thresholds: Thresholds) -> fl
         contributions.append((_dr14_score(inputs.dr14, thresholds.dr14_shift), TRACK_HEALTH_WEIGHTS['dr14']))
     if inputs.has_mains_hum is not None:
         contributions.append((1.0 if inputs.has_mains_hum else 0.0, TRACK_HEALTH_WEIGHTS['mains_hum']))
+    if inputs.noise_floor_db is not None:
+        steps = _anchored_steps(NOISE_FLOOR_STEPS, NOISE_FLOOR_THRESHOLD_DB, thresholds.noise_floor_db)
+        score = _step_score(inputs.noise_floor_db, steps, lambda v, t: v >= t)
+        contributions.append((score, TRACK_HEALTH_WEIGHTS['noise_floor']))
     if not contributions:
         return None
     total_weight = sum(w for _, w in contributions)
@@ -1544,7 +1594,7 @@ def analyze_file_health(filename: str, ffmpeg_path: str | None = None) -> FileHe
     `FfmpegNotFoundError`/`FfmpegVersionTooOldError` still raise — an
     environment problem unrelated to any one file, not a per-file
     verdict — but a decode failure on this specific file is a real
-    persisted `file_tier="Broken"` result (see _broken_file_health_result),
+    persisted `file_tier="Unplayable"` result (see _broken_file_health_result),
     not an exception.
     """
     ffmpeg = find_ffmpeg(ffmpeg_path)
@@ -1825,6 +1875,11 @@ def analyze_track_health(
     if hum_note is not None:
         track_issues.append(hum_note)
     noise_floor_db = _measure_noise_floor(ffmpeg, filename, quiet_interval)
+    if noise_floor_db is not None and noise_floor_db >= thresholds.noise_floor_db:
+        track_issues.append(
+            f"Background noise (hiss/static) is audible in quiet passages ({noise_floor_db:.0f}dB) — "
+            f"likely left over from an analog transfer or a noisy recording environment{_tunable('Noise Floor')}"
+        )
 
     ok_threshold = DR14_OK_THRESHOLD - thresholds.dr14_shift
     if dr14 is not None and dr14 < ok_threshold:
@@ -1841,6 +1896,7 @@ def analyze_track_health(
             is_out_of_phase=is_out_of_phase,
             dr14=dr14,
             has_mains_hum=has_mains_hum,
+            noise_floor_db=noise_floor_db,
         ),
         thresholds,
     )
