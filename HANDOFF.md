@@ -1,17 +1,24 @@
-# Handoff — File Health plugin, near-complete rewrite in progress
+# Handoff — File Health plugin, near-complete rewrite in progress (session 2)
 
-Session hit a context limit mid-rewrite. This replaces the previous HANDOFF.md
-entirely — tonight's session concluded that a large piece of the existing
-architecture (OR-gate tiering) needs to be replaced, not patched, so treat the
-*design decisions* below as the source of truth going forward, not the old
-gate-based code still sitting in `analysis.py` at HEAD.
+Two sessions in on this rewrite now. The first hit a context limit mid-
+redesign (see "The redesign" section below — still accurate, nothing there
+changed). This second session finished the first item of that session's own
+build plan (the two new File Health checks) with full real-data validation,
+then stopped at a clean checkpoint rather than rush the much larger
+remaining scope (calibrated weighted scoring + a full UI rewrite) — see
+"Session 2 progress" below for what changed and why, and the revised build
+plan at the bottom for exactly where to resume.
 
 **Repo**: `~/Documents/code_repo/picard-file-health`, own git repo.
-**HEAD**: `71b2349` "Replace corruption-signature heuristic: bit-reservoir
-bits_left, not ratio" — working tree clean, nothing uncommitted.
+**HEAD**: `463effe` "Add two new File Health structural checks: Xing-header
+size mismatch, non-audio corruption" — working tree clean, nothing
+uncommitted.
 **Do not assume anything about `analysis.py`'s tier logic beyond what's
 described here is still correct** — this doc describes what ships at HEAD
-*and* the redesign that supersedes big parts of it.
+*and* the redesign that supersedes big parts of it. The two new checks
+*are* wired into the current (still single-tier, still-being-replaced)
+`analyze_file()` as ordinary `issues` entries; they'll get recategorized
+as pure File Health inputs, not rewritten, once the two-tier scorer lands.
 
 ## What this is
 
@@ -301,16 +308,10 @@ container-level):
 - Dynamic Range / Compression Tolerance (DR14)
 - Mains Hum
 
-**True Peak was discussed as a candidate for a third "imperceptible" bucket**
-(technically real, not audible — median value tonight sits in the meter's
-own documented accuracy-limit zone) alongside Fake Hi-Res and the bitrate
-transparency note. **This got superseded by the "no gates, just weighted
-scoring" decision** — instead of a separate imperceptible-non-gating bucket,
-True Peak just becomes a Track Health input with a low weight/contribution
-in the composite score, same mechanism as everything else. Re-confirm this
-resolution with the user at the start of next session if picking this back
-up — it was the last architectural thread before the handoff, not fully
-closed out in as many words.
+**True Peak's bucket was confirmed with the user in session 2**: it folds
+into Track Health as a normal weighted input at a lower default weight,
+not a separate "imperceptible" bucket. This thread is now fully closed —
+no need to re-ask.
 
 ### Scoring mechanics — designed, not yet implemented
 
@@ -341,65 +342,103 @@ still be evidence-grounded:
   don't scale severity by count without new evidence; presence/absence is
   the validated signal, not magnitude.
 
-### Two new File Health checks — designed, partially tested, not built
+### Two new File Health checks — DONE, built and validated in session 2
 
-**Non-audio corruption**: check embedded artwork/tag structure. Design intent
-was to reuse ffmpeg itself (already a hard dependency, avoid adding Pillow)
-— probe for a video/attached-pic stream via `ffprobe -select_streams v:0`,
-and if present, attempt `-map 0:v:0 -frames:v 1 -f null -`; a non-zero
-return code means the embedded image is corrupt. Confirmed empirically
-tonight that the *real* `analyze_file` pipeline (explicit `-filter_complex` +
-explicit `-map` for audio-only outputs) **never touches the video stream at
-all** — so this is a genuinely new code path, not something already
-accidentally covered, and safe to add without risk of contaminating the
-existing audio corruption check (verified: a file with a known-corrupted
-embedded PNG scored clean today, tier driven only by DR14). Tag-structure
-validation via `mutagen.File(filename)` wrapped in try/except was sketched
-but not tested.
+Both are real, committed, wired into the current `analyze_file()`'s
+`issues` list (HEAD `463effe`). Full rationale and validation evidence is
+in the code comments (`analysis.py`, `SIZE_MISMATCH_RATIO_THRESHOLD` and
+`_detect_artwork_corruption`/`_detect_tag_structure_error` docstrings) —
+summary here:
 
-**Concatenated-file detection**: reuse ffmpeg's own `"invalid concatenated
-file detected"` demuxer message. **Confirmed tonight that plain `ffprobe -v
-warning -i file` does NOT surface this warning** (tested against the known
-Armin Van Buuren file — silent) — it only appeared during a full `ffmpeg -i
-file -f null -` decode in the earlier severe-marker sweep. **Next step,
-where the session was cut off**: confirm exactly which invocation surfaces
-it reliably (a decode-only pass may be needed, not probe-only) and whether
-it's already visible for free in the existing merged decode's stderr before
-adding any new subprocess call.
+**Concatenated-file detection became "Xing/VBR header size mismatch"
+instead** — the originally-planned approach (keying off ffmpeg's own
+`"invalid concatenated file detected"` demuxer message) didn't survive
+contact with real data. Confirmed the message no longer reproduces on the
+original Armin Van Buuren reference file via any invocation this module
+uses. More importantly, reading FFmpeg's own `libavformat/mp3dec.c` source
+showed that message is generated from comparing the Xing header's own
+*encoder-written* `header_filesize` field against the real on-disk size —
+the exact same signal source already proven unreliable in the (rejected)
+truncation-detection investigation (old encoders can write a wrong value
+with nothing structurally wrong). The user's call: don't try to force a
+binary concatenated/truncated verdict out of that ambiguity — report
+**direction and magnitude** of the header/actual-size disagreement as a
+structural fact in its own right, regardless of root cause. Implemented as
+`_detect_size_mismatch()`, reading the Xing header directly via mutagen
+(not ffmpeg's log line) for determinism. Calibrated against a real
+500-file random sample: 366/370 files with a usable Xing header landed at
+<=0.43% (floating-point noise), then a clean gap to 4 real outliers at
+21%-182% — three of which independently show `bits_left` corruption hits.
+Zero false positives.
 
-## Concrete build plan for next session
+**Non-audio corruption** (embedded artwork + tag structure) shipped as
+designed, with two sub-checks:
+- `_detect_artwork_corruption`: ffprobe for an attached-pic stream, then
+  attempt to decode its first frame via ffmpeg; non-zero exit = corrupt.
+  Validated: mild corruption (scattered bit flips, or truncating to 20%
+  while keeping SOF/DQT/SOS header segments) decodes silently with only a
+  warning — same class of limitation as `bits_left`. Truncating past the
+  header segments entirely reliably produces a real decode error. Found a
+  genuine, previously-undetected real defect in this repo's own Chevelle
+  fixture: its embedded art is tagged PNG but is actually JPEG bytes.
+- `_detect_tag_structure_error`: `mutagen.File()` wrapped in try/except —
+  a different parser/code path than ffmpeg's own more-lenient container
+  reading. Validated against a 100-file real M4A sample (0 false
+  positives) plus this repo's fixtures: found a genuine malformed `----`
+  freeform atom (missing its required `mean`/`name` sub-atoms) in a real
+  3 Doors Down M4A already in the corpus — confirmed by hand-walking the
+  atom structure, not assumed; ffmpeg's own tag reader silently tolerates
+  it, which is exactly why this is a real gap mutagen's stricter parser
+  fills.
+
+## Concrete build plan for session 3
 
 Work through in this order — each is a real checkpoint, validate before
-moving to the next (same discipline as tonight throughout):
+moving to the next (same discipline both prior sessions used throughout):
 
-1. **Finish the two new File Health checks.** Resolve the concatenated-file
-   invocation question above. Build and test non-audio corruption detection
-   against the Michael Jackson file (known-corrupted PNG) and a clean
-   control. Validate both against a real library sample for false positives,
-   same rigor as `bits_left` got tonight — don't skip this step, every
-   heuristic shipped tonight that skipped real-data validation first had to
-   be reworked.
-2. **Build the Track Health composite scorer.** Reuse `_gate_cell`'s
-   step-table distance logic (currently living in `__init__.py`'s
-   comparison-matrix code — consider whether it belongs in `analysis.py`
-   now that it's driving the core tier, not just a UI cell color). Compute
-   real score distributions across a library sample to place the 5 tier
-   boundaries with evidence, not guesses.
-3. **Build the File Health composite scorer.** Same real-data-first
-   discipline for the Bad/Good boundary specifically — `bits_left` presence
-   is validated, but confirm the full combined signal doesn't over- or
-   under-trigger before finalizing.
+1. ~~Finish the two new File Health checks.~~ **DONE** (session 2, HEAD
+   `463effe`) — see "Two new File Health checks" above.
+2. **Build the Track Health composite scorer.** Move `_gate_cell`'s
+   step-table distance logic from `__init__.py` (currently Qt-adjacent UI
+   code) into `analysis.py` — it's framework-agnostic (plain floats/tuples,
+   no Qt types) and is about to drive the core tier, not just a UI cell
+   color; `__init__.py`'s compare-matrix should import and reuse the same
+   function rather than keep a second copy. Reuse the existing step tables
+   (`_CLIP_STEPS`, `_TRUE_PEAK_STEPS`, `_SPECTRAL_STEPS`, `_PHASE_STEPS`,
+   `_DR14_SHIFT_STEPS`) as the distance scale for each check's contribution.
+   Sum weighted per-check scores (Clipping, Spectral Cutoff, Out-of-Phase,
+   Mains Hum, DR14 at full weight; True Peak and Fake Hi-Res at a lower
+   weight — confirmed with the user in session 2, see above) into one
+   composite. **Tier boundaries need real-data calibration**: compute the
+   composite's actual distribution across a broad library sample (reuse
+   this session's `/tmp/all_master_mp3s.txt` enumeration and sampling
+   approach if still on disk, or regenerate — see the enumeration commands
+   at the bottom of this doc) and place the 5 tier boundaries from that
+   distribution, not a guess.
+3. **Build the File Health composite scorer.** No sliders, so simpler, but
+   still evidence-grounded for the exact Bad/Good boundary: `bits_left`
+   presence, the two new session-2 checks (size mismatch, non-audio
+   corruption), and codec/bitrate transparency all feed in — confirm the
+   combined signal doesn't over/under-trigger against a real sample before
+   finalizing, the same way each individual check already was.
 4. **Reclassify decode failure**: `AnalysisError` → persisted
-   `file_tier="Broken"` result, not an exception. Audit every caller in
+   `file_tier="Broken"` result, not an exception. Note `content_hash()`
+   doesn't need a successful decode (it hashes raw bytes) so it can still
+   be computed and stored even for a Broken file. Audit every caller in
    `__init__.py` that currently catches `AnalysisError` (`_scan_one`) — the
    error-message statusbar path likely goes away entirely for this specific
-   case.
+   case. `FfmpegNotFoundError`/`FfmpegVersionTooOldError` stay exceptions —
+   unrelated environment problems, not a per-file verdict.
 5. **Rewrite `analyze_file`** to assemble and return both tiers plus every
    existing raw value (nothing measured should be lost, just recombined).
-   Regression-test against `/tmp/run_fixtures.py`'s fixture catalogue (if
-   still on disk) and the real files in `assets/` — the top-20 badness list
-   should still land at low tiers under the new scoring, even though the
-   exact number/label will change.
+   This means splitting the current single `issues`/`info` lists by which
+   score they feed — the check-categorization table above is the exact
+   split to use. Regression-test against the real files in `assets/` (all
+   still real "Bad"-tier fixtures) and this session's own engineered
+   fixtures if still on disk (`/tmp/concat_test.mp3`,
+   `/tmp/corrupt_art*.mp3`, `/tmp/corrupt_tag.mp3`) — every one should still
+   land at a low File or Track tier under the new scoring, even though the
+   exact tier label/number will change.
 6. **Metadata schema**: `~health_tier` → two keys (`~health_file_tier`,
    `~health_track_tier` or similar). Decide the migration story for already-
    scanned files (old single-tier metadata goes stale until rescanned — is
