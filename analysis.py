@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import mutagen
@@ -220,6 +221,103 @@ class Thresholds:
     dr14_shift: float = 0.0
 
 
+# --- Track Health: weighted composite scoring ---
+#
+# Replaces the old OR-gate architecture (any one check firing forced the
+# whole file to "Bad") — see HANDOFF.md's "The redesign" section for the
+# full rationale (a single borderline True Peak reading, median only half
+# a dB past its own threshold, was driving 58% of all "Bad" verdicts in a
+# real 750-file sample). Every check below instead contributes a
+# continuous 0..1 "defect score" (0 = comfortably clean, 1 = fails even
+# the most lenient calibrated setting), weighted by how confidently that
+# check's measurement maps to an actually-audible defect, then averaged.
+#
+# Each step table below is the same lenient->lenient-to-strict calibrated
+# scale already used for the Options-page sensitivity sliders (see
+# __init__.py's _SensitivitySlider) — reused here, not reinvented, so the
+# composite score's granularity matches real, previously-validated
+# threshold data rather than an arbitrary new curve. (value, hint) pairs,
+# ordered lenient -> strict; only the values are used for scoring, the
+# hints stay in __init__.py where the slider UI displays them.
+CLIP_STEPS: tuple[float, ...] = (25.0, 20.0, 16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.1, 0.05)
+TRUE_PEAK_STEPS: tuple[float, ...] = (3.0, 2.0, 1.5, 1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.0)
+SPECTRAL_STEPS: tuple[float, ...] = (-90.0, -85.0, -75.0, -65.0, -60.0, -55.0, -50.0, -45.0, -35.0, -30.0)
+PHASE_STEPS: tuple[float, ...] = (179.0, 177.0, 174.0, 170.0, 165.0, 158.0, 150.0, 140.0, 120.0, 95.0)
+
+
+def _step_score(value: float, steps: tuple[float, ...], fails: Callable[[float, float], bool]) -> float:
+    """Fraction of the calibrated lenient->strict steps this value would
+    already fail, as a 0..1 defect score. Monotonic by construction (a
+    stricter step is always at least as easy to fail as a more lenient
+    one), so this is just "how far into the strict end of the scale does
+    this value already sit" — 0.0 means it wouldn't even fail the
+    strictest calibrated setting (genuinely clean), 1.0 means it fails
+    even the most lenient one (unambiguous, severe defect). Reuses the
+    same steps as the Options-page sliders rather than a separately
+    invented curve, so a "0.7" score means the same thing here as it
+    would sliding the matching slider 70% of the way to strict.
+    """
+    return sum(1 for step in steps if fails(value, step)) / len(steps)
+
+
+def _dr14_score(dr14: int, dr14_shift: float) -> float:
+    """DR14's contribution is a continuous gradient, not a step table:
+    the official TT DR Offline Meter manual already documents a
+    continuous red->green scale from DR8 (Poor) to DR14 (green), not a
+    series of discrete calibrated gate thresholds the way the other
+    checks have — linear interpolation between the shifted Poor/Great
+    anchors matches that manual's own framing directly, clamped to 0..1
+    outside the documented range.
+    """
+    poor = DR14_POOR_THRESHOLD - dr14_shift
+    great = DR14_GREAT_THRESHOLD - dr14_shift
+    if great <= poor:
+        return 0.0
+    return max(0.0, min(1.0, (great - dr14) / (great - poor)))
+
+
+# Per-check weight in the Track Health composite — how confidently each
+# check's measurement maps to an actually-audible defect, not how
+# "serious" it sounds in isolation. Confirmed with the user: True Peak
+# and Fake Hi-Res get a low weight rather than a separate non-gating
+# bucket (median True Peak overs in a real 750-file sample sat just
+# 0.5dB past threshold, inside the meter's own documented accuracy
+# limit — see TRUE_PEAK_THRESHOLD_DBTP). Mains Hum is similarly
+# downweighted: its own docstring already calls it "strong likelihood,
+# not a definitive measurement" (can't fully rule out a real sustained
+# musical drone at the same frequency). Clipping/Spectral Cutoff/
+# Out-of-Phase/DR14 are direct, high-confidence measurements of the
+# decoded signal and get full weight.
+TRACK_HEALTH_WEIGHTS: dict[str, float] = {
+    'clipping': 1.0,
+    'spectral_cutoff': 1.0,
+    'out_of_phase': 1.0,
+    'dr14': 1.0,
+    'true_peak': 0.3,
+    'fake_hires': 0.3,
+    'mains_hum': 0.5,
+}
+
+
+# Track Health tier boundaries on the 0..1 weighted composite score.
+# PLACEHOLDER pending real-data calibration (see build plan in
+# HANDOFF.md) — an even 3-way split of the 0..1 range as a starting
+# point only, not yet validated against a real library sample.
+TRACK_HEALTH_BAD_THRESHOLD = 0.5
+TRACK_HEALTH_GOOD_THRESHOLD = 0.25
+TRACK_HEALTH_GREAT_THRESHOLD = 0.1
+
+
+def track_tier_from_score(score: float) -> str:
+    if score >= TRACK_HEALTH_BAD_THRESHOLD:
+        return "Bad"
+    if score >= TRACK_HEALTH_GOOD_THRESHOLD:
+        return "Good"
+    if score >= TRACK_HEALTH_GREAT_THRESHOLD:
+        return "Great"
+    return "Excellent"
+
+
 # Real-world DR14 quality bands, grounded in the official TT DR Offline
 # Meter manual's own documented color scale (red below DR8, green at
 # DR14+, yellow in between) and its worked examples (DR9 called a
@@ -366,20 +464,6 @@ class FfmpegVersionTooOldError(FfmpegNotFoundError):
     existing caller that already catches that one exception (the scan
     pipeline in __init__.py) handles this the same way, with no separate
     except clause needed anywhere.
-    """
-
-
-class AnalysisError(RuntimeError):
-    """Raised when ffmpeg/ffprobe fails outright on a given file.
-
-    Every file this plugin analyzes is user-supplied — possibly corrupt,
-    truncated, not really audio at all despite its extension, or
-    adversarially crafted — so this is an expected, handled outcome for
-    bad input, not a bug to fix. Raised only for the one call this module
-    genuinely can't proceed without (the first astats pass — see
-    analyze_file); every other ffmpeg/ffprobe call degrades gracefully
-    to "no defect detected" on failure instead of raising, via
-    _run_subprocess never raising for expected subprocess-level failures.
     """
 
 
@@ -1289,15 +1373,112 @@ def _tunable(slider_name: str) -> str:
     return f' (Adjust in Options \u2192 File Health: "{slider_name}" slider)'
 
 
+FILE_TIER_BROKEN = "Broken"
+FILE_TIER_BAD = "Bad"
+FILE_TIER_GOOD = "Good"
+FILE_TIER_GREAT = "Great"
+FILE_TIER_EXCELLENT = "Excellent"
+
+
+def _compute_file_tier(file_issues: list[str], stream_info: StreamInfo) -> str:
+    """File Health has no sliders — see HANDOFF.md's "The redesign"
+    section — so this mapping is fixed rather than threshold-tunable:
+    any structural defect (audio/non-audio corruption, a malformed
+    tag/artwork structure, a Xing-header size mismatch) is `Bad`
+    regardless of bitrate; a structurally sound file is graded purely
+    by codec/bitrate using the same HydrogenAudio/Xiph transparency
+    consensus already validated for `_bitrate_transparency_note`.
+    """
+    if file_issues:
+        return FILE_TIER_BAD
+    codec_name = (stream_info.codec_name or '').lower()
+    if _is_lossless_codec(codec_name):
+        return FILE_TIER_EXCELLENT
+    threshold = TRANSPARENT_BITRATE_KBPS.get(codec_name)
+    is_he_aac = codec_name == 'aac' and stream_info.profile and 'he-aac' in stream_info.profile.lower()
+    if is_he_aac or threshold is None or stream_info.bitrate_kbps is None:
+        # No published transparency threshold to grade against (unknown
+        # codec, missing bitrate data, or HE-AAC's SBR extension being
+        # transparent at bitrates far below the plain-AAC-LC threshold —
+        # see _bitrate_transparency_note) — can't confidently call this
+        # "Great", but there's no structural defect either.
+        return FILE_TIER_GOOD
+    return FILE_TIER_GREAT if stream_info.bitrate_kbps >= threshold else FILE_TIER_GOOD
+
+
+_LOSSLESS_CODECS = {'flac', 'alac', 'wavpack', 'tta', 'ape'}
+
+
+def _is_lossless_codec(codec: str) -> bool:
+    return codec in _LOSSLESS_CODECS or codec.startswith('pcm_')
+
+
+@dataclass
+class TrackHealthInputs:
+    """Every Track Health check's raw value, decoupled from
+    AnalysisResult so compute_track_score is independently testable.
+    None means "not applicable/not measured" — excluded from the
+    composite rather than treated as a clean 0.0, so an unmeasured
+    check can't silently pull a score toward "better than it is".
+    """
+    flat_factor: float | None
+    true_peak_dbtp: float | None
+    has_signal: bool
+    spectral_energy_above_cutoff_db: float | None
+    is_hires: bool
+    spectral_energy_above_hires_cutoff_db: float | None
+    is_out_of_phase: bool | None
+    dr14: int | None
+    has_mains_hum: bool | None
+
+
+def compute_track_score(inputs: TrackHealthInputs, thresholds: Thresholds) -> float | None:
+    """Weighted-average composite in 0..1 (0 = clean, 1 = fails every
+    applicable check at its most lenient calibrated setting) — see the
+    "Track Health: weighted composite scoring" section above for the
+    full design rationale. Returns None only when literally nothing
+    could be measured (in practice this shouldn't happen for any file
+    that reached this point — clipping/true-peak are always measured
+    off the very first decode pass — but a caller has to handle "no
+    Track Health tier" for a File Health `Broken` result regardless).
+    """
+    contributions: list[tuple[float, float]] = []
+    if inputs.flat_factor is not None:
+        score = _step_score(inputs.flat_factor, CLIP_STEPS, lambda v, t: v > t)
+        contributions.append((score, TRACK_HEALTH_WEIGHTS['clipping']))
+    if inputs.true_peak_dbtp is not None:
+        score = _step_score(inputs.true_peak_dbtp, TRUE_PEAK_STEPS, lambda v, t: v >= t)
+        contributions.append((score, TRACK_HEALTH_WEIGHTS['true_peak']))
+    if inputs.has_signal and inputs.spectral_energy_above_cutoff_db is not None:
+        score = _step_score(inputs.spectral_energy_above_cutoff_db, SPECTRAL_STEPS, lambda v, t: v < t)
+        contributions.append((score, TRACK_HEALTH_WEIGHTS['spectral_cutoff']))
+    if inputs.is_hires and inputs.has_signal and inputs.spectral_energy_above_hires_cutoff_db is not None:
+        score = _step_score(inputs.spectral_energy_above_hires_cutoff_db, SPECTRAL_STEPS, lambda v, t: v < t)
+        contributions.append((score, TRACK_HEALTH_WEIGHTS['fake_hires']))
+    if inputs.is_out_of_phase is not None:
+        contributions.append((1.0 if inputs.is_out_of_phase else 0.0, TRACK_HEALTH_WEIGHTS['out_of_phase']))
+    if inputs.dr14 is not None:
+        contributions.append((_dr14_score(inputs.dr14, thresholds.dr14_shift), TRACK_HEALTH_WEIGHTS['dr14']))
+    if inputs.has_mains_hum is not None:
+        contributions.append((1.0 if inputs.has_mains_hum else 0.0, TRACK_HEALTH_WEIGHTS['mains_hum']))
+    if not contributions:
+        return None
+    total_weight = sum(w for _, w in contributions)
+    return sum(s * w for s, w in contributions) / total_weight
+
+
 @dataclass
 class AnalysisResult:
-    tier: str
-    issues: list[str]
+    file_tier: str
+    track_tier: str | None
+    file_issues: list[str]
+    track_issues: list[str]
     info: list[str]
+    track_score: float | None
     content_hash: str
     lufs: float | None
     true_peak_dbtp: float | None
-    clipping_flat_factor: float
+    clipping_flat_factor: float | None
     spectral_energy_above_cutoff_db: float | None
     spectral_energy_above_hires_cutoff_db: float | None
     lame_lowpass_hz: int | None
@@ -1308,8 +1489,43 @@ class AnalysisResult:
     stream_info: StreamInfo
     is_out_of_phase: bool | None
     is_mono_duplicated: bool | None
+    has_mains_hum: bool | None
     peak_db: float | None
     size_mismatch: SizeMismatch | None
+
+
+def _broken_result(filename: str, reason: str) -> AnalysisResult:
+    """A file ffmpeg can't decode at all is a real, persisted File Health
+    fact (`Broken`, terminal — Track Health is structurally impossible to
+    measure, not merely unmeasured), not a transient scan error. Only
+    `content_hash` can still be computed (it hashes raw bytes, no decode
+    needed) — everything else genuinely has nothing to report.
+    """
+    return AnalysisResult(
+        file_tier=FILE_TIER_BROKEN,
+        track_tier=None,
+        file_issues=[reason],
+        track_issues=[],
+        info=[],
+        track_score=None,
+        content_hash=content_hash(filename),
+        lufs=None,
+        true_peak_dbtp=None,
+        clipping_flat_factor=None,
+        spectral_energy_above_cutoff_db=None,
+        spectral_energy_above_hires_cutoff_db=None,
+        lame_lowpass_hz=None,
+        dr14=None,
+        spectral_bandwidth_hz=None,
+        noise_floor_db=None,
+        stereo_coherence=None,
+        stream_info=StreamInfo(None, None, None, None, None),
+        is_out_of_phase=None,
+        is_mono_duplicated=None,
+        has_mains_hum=None,
+        peak_db=None,
+        size_mismatch=None,
+    )
 
 
 def analyze_file(
@@ -1319,15 +1535,25 @@ def analyze_file(
     instant. Every whole-file measurement that doesn't depend on another
     measurement's result first runs in one merged ffmpeg invocation (see
     _run_merged_analysis) — one decode instead of the 3-5 separate passes
-    this used to spawn. DR14 and hum detection stay separate, later
-    passes: both are only worth running when no gate has already fired,
-    a real cost this function still avoids paying on a file that's
-    already "Bad" for an unrelated, definitively measured reason.
+    this used to spawn. DR14 and hum detection now always run (unlike the
+    old OR-gate architecture, which skipped both once any gate had
+    already forced "Bad" — Track Health's weighted composite needs every
+    applicable check's real value, not a shortcut that made sense only
+    when a single fired gate already decided the whole file's fate).
 
     `thresholds` defaults to the empirically-calibrated Thresholds()
     values when omitted — callers (the Options page sliders) override
     per scan rather than mutating module state, since scans may run
     concurrently across several files on Picard's background-thread pool.
+
+    Returns two independent tiers (see HANDOFF.md's "The redesign"):
+    File Health (structural, `result.file_tier`, never None) and Track
+    Health (perceptual, `result.track_tier`, None only when File Health
+    is `Broken` — a file that won't decode has nothing to measure
+    perceptually). `FfmpegNotFoundError`/`FfmpegVersionTooOldError` still
+    raise — an environment problem unrelated to any one file, not a
+    per-file verdict — but a decode failure on this specific file is now
+    a real persisted result (see _broken_result), not an exception.
     """
     thresholds = thresholds or Thresholds()
     ffmpeg = find_ffmpeg(ffmpeg_path)
@@ -1355,25 +1581,25 @@ def analyze_file(
         # Every measurement in this module depends on the same decode
         # succeeding — a non-zero exit means ffmpeg couldn't process the
         # file at all (corrupt, truncated, not really audio despite the
-        # extension, or it hit the timeout), so there's nothing
-        # trustworthy to report rather than silently defaulting to "no
-        # defects found".
-        raise AnalysisError(
+        # extension, or it hit the timeout).
+        return _broken_result(
+            filename,
             f"ffmpeg couldn't decode {os.path.basename(filename)} as audio "
-            "(corrupt, truncated, unsupported format, or a decode timeout) — not scored"
+            "(corrupt, truncated, unsupported format, or a decode timeout)",
         )
     main_stderr = _filter_instance_output(merged_stderr, 'main')
     flat_factor, peak_db = _parse_astats(main_stderr)
     above_cutoff_db = _parse_mean_volume(_filter_instance_output(merged_stderr, 'cutoff'))
     lufs, true_peak = _parse_loudnorm(merged_stderr)
     # Informational only, for the compare panel's ranking — doesn't feed
-    # `issues`/tier (see BANDWIDTH_* constants for why this is a
+    # either tier (see BANDWIDTH_* constants for why this is a
     # continuous, cause-agnostic estimate rather than a defect gate).
     spectral_bandwidth_hz = _measure_bandwidth(merged_stderr, stream_info.sample_rate, peak_db)
     corruption_note = _detect_corruption_signature(merged_stderr)
     size_mismatch = _detect_size_mismatch(filename)
 
-    issues: list[str] = []
+    file_issues: list[str] = []
+    track_issues: list[str] = []
     info: list[str] = []
 
     bitrate_note = _bitrate_transparency_note(stream_info)
@@ -1381,36 +1607,38 @@ def analyze_file(
         info.append(bitrate_note)
 
     if corruption_note is not None:
-        info.append(corruption_note)
+        # A real decoder-level structural signal (see CORRUPTION_BITS_LEFT_
+        # PATTERN) — File Health, not merely informational, under the
+        # redesign: presence (not count, see that constant's own
+        # calibration note) is the validated signal.
+        file_issues.append(corruption_note)
 
     if size_mismatch is not None:
         declared_mb = size_mismatch.declared_bytes / 1_000_000
         actual_mb = size_mismatch.actual_bytes / 1_000_000
         if size_mismatch.direction == 'extra_data':
-            issues.append(
+            file_issues.append(
                 f"File has {size_mismatch.ratio * 100:.0f}% more audio data than its own VBR header "
                 f"accounts for ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
                 "consistent with extra data appended after the original track ended"
             )
         else:
-            issues.append(
+            file_issues.append(
                 f"File has {size_mismatch.ratio * 100:.0f}% less audio data than its own VBR header "
                 f"declares ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
                 "consistent with the file being truncated or rewritten after encoding"
             )
 
     if _detect_artwork_corruption(ffmpeg, ffprobe, filename):
-        issues.append(
-            "Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it"
-        )
+        file_issues.append("Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it")
 
     tag_error = _detect_tag_structure_error(filename)
     if tag_error is not None:
-        issues.append(f"Malformed tag structure — {tag_error}")
+        file_issues.append(f"Malformed tag structure — {tag_error}")
 
     has_clipping = flat_factor > thresholds.clip_flat_factor
     if has_clipping:
-        issues.append(f"Sound is clipped — pushed past full volume and distorted{_tunable('Clipping')}")
+        track_issues.append(f"Sound is clipped — pushed past full volume and distorted{_tunable('Clipping')}")
 
     has_true_peak_overs = true_peak is not None and true_peak >= thresholds.true_peak_dbtp
     if has_true_peak_overs and not has_clipping:
@@ -1418,7 +1646,7 @@ def analyze_file(
         # defect — both signals pointing at "this file clips" is redundant
         # to say twice, but true-peak-only is a genuinely distinct finding
         # (inter-sample overshoot with no sample actually at full scale).
-        issues.append(
+        track_issues.append(
             f"Volume peaks go past full scale between samples (True Peak {true_peak:+.1f}dBTP) "
             f"— can distort on some playback equipment{_tunable('True Peak')}"
         )
@@ -1439,16 +1667,16 @@ def analyze_file(
             # past our check frequency — so this encode's own filtering
             # cannot explain the measured silence up there. The source
             # feeding this encode was already missing that content.
-            issues.append(
+            track_issues.append(
                 f"Confirmed lossy source: the encoder's own settings would have let sound up "
                 f"to {lame_lowpass_hz / 1000:.1f}kHz through, but there's none above "
                 f"{SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz — this was compressed from an "
-                f"already lossy source before reaching this file{_tunable('Missing Treble')}"
+                f"already lossy source before reaching this file{_tunable('Spectral Cutoff')}"
             )
         else:
-            issues.append(
+            track_issues.append(
                 f"Missing all sound above {SPECTRAL_CUTOFF_FREQUENCY_HZ / 1000:.0f}kHz — likely "
-                f"converted from a lossy file (like an MP3) at some point{_tunable('Missing Treble')}"
+                f"converted from a lossy file (like an MP3) at some point{_tunable('Spectral Cutoff')}"
             )
 
     above_hires_cutoff_db: float | None = None
@@ -1466,10 +1694,10 @@ def analyze_file(
             # a hard wall there means the file was upsampled from an
             # ordinary-rate source, not actually recorded/mastered at its
             # declared rate.
-            issues.append(
+            track_issues.append(
                 f"Labeled as {stream_info.sample_rate}Hz hi-res audio, but has no real sound "
                 f"above {FAKE_HIRES_CHECK_FREQUENCY_HZ / 1000:.0f}kHz — likely stretched up "
-                f"from an ordinary file rather than genuine hi-res{_tunable('Missing Treble')}"
+                f"from an ordinary file rather than genuine hi-res{_tunable('Spectral Cutoff')}"
             )
 
     # Phase/channel-identity checks need two channels to compare —
@@ -1484,62 +1712,57 @@ def analyze_file(
         stereo_coherence = _measure_stereo_coherence(merged_stdout)
         if is_out_of_phase:
             # A real, audible defect — will cancel out when summed to mono
-            # (many phone/laptop/car speakers do this) — a genuine gate
-            # issue, not just informational.
-            issues.append(
+            # (many phone/laptop/car speakers do this).
+            track_issues.append(
                 f"Left and right channels cancel out — will sound hollow or vanish entirely on "
                 f"mono speakers{_tunable('Out-of-Phase Channels')}"
             )
         if is_mono_duplicated:
             # Not a quality defect — a mono source duplicated into both
             # channels loses nothing, it's just wasteful. Informational,
-            # doesn't affect the tier.
+            # doesn't affect either tier.
             info.append("Left/right channels are identical (mono content in a stereo container)")
 
-    dr14: int | None = None
-    noise_floor_db: float | None = None
-    if not issues:
-        # Only worth the extra ffprobe + windowed-astats pass when no gate
-        # already forced "Bad" — a defective file's dynamic range doesn't
-        # change its tier either way.
-        dr14 = _measure_dr14(ffmpeg, filename, stream_info.sample_rate)
+    # Always measured now — Track Health's composite needs DR14/hum's
+    # real values regardless of what else fired, unlike the old OR-gate
+    # architecture where a file already forced "Bad" made these two
+    # extra passes not worth their cost.
+    dr14 = _measure_dr14(ffmpeg, filename, stream_info.sample_rate)
+    quiet_interval = _find_quiet_interval(ffmpeg, filename)
+    hum_note = _detect_hum(ffmpeg, filename, quiet_interval)
+    has_mains_hum = hum_note is not None
+    if hum_note is not None:
+        track_issues.append(hum_note)
+    noise_floor_db = _measure_noise_floor(ffmpeg, filename, quiet_interval)
 
-        # Same reasoning: hum detection and the noise-floor estimate both
-        # need a silencedetect pass plus scoped ffmpeg passes, not worth
-        # it on a file already gated "Bad" for an unrelated, definitively
-        # measured reason. One silencedetect pass serves both checks.
-        quiet_interval = _find_quiet_interval(ffmpeg, filename)
-        hum_note = _detect_hum(ffmpeg, filename, quiet_interval)
-        if hum_note is not None:
-            info.append(hum_note)
-        noise_floor_db = _measure_noise_floor(ffmpeg, filename, quiet_interval)
-
-    poor_threshold = DR14_POOR_THRESHOLD - thresholds.dr14_shift
     ok_threshold = DR14_OK_THRESHOLD - thresholds.dr14_shift
-    good_threshold = DR14_GOOD_THRESHOLD - thresholds.dr14_shift
-    great_threshold = DR14_GREAT_THRESHOLD - thresholds.dr14_shift
-    if issues:
-        tier = "Bad"
-    elif dr14 is None:
-        tier = "Excellent"
-    elif dr14 < poor_threshold:
-        tier = "Poor"
-        issues.append(f"Heavily compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
-    elif dr14 < ok_threshold:
-        tier = "Ok"
-        issues.append(f"Compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
-    elif dr14 < good_threshold:
-        tier = "Good"
-        issues.append(f"Moderately compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
-    elif dr14 < great_threshold:
-        tier = "Great"
-    else:
-        tier = "Excellent"
+    if dr14 is not None and dr14 < ok_threshold:
+        track_issues.append(f"Compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
+
+    file_tier = _compute_file_tier(file_issues, stream_info)
+    track_score = compute_track_score(
+        TrackHealthInputs(
+            flat_factor=flat_factor,
+            true_peak_dbtp=true_peak,
+            has_signal=has_signal,
+            spectral_energy_above_cutoff_db=above_cutoff_db,
+            is_hires=is_hires,
+            spectral_energy_above_hires_cutoff_db=above_hires_cutoff_db,
+            is_out_of_phase=is_out_of_phase,
+            dr14=dr14,
+            has_mains_hum=has_mains_hum if quiet_interval is not None else None,
+        ),
+        thresholds,
+    )
+    track_tier = track_tier_from_score(track_score) if track_score is not None else None
 
     return AnalysisResult(
-        tier=tier,
-        issues=issues,
+        file_tier=file_tier,
+        track_tier=track_tier,
+        file_issues=file_issues,
+        track_issues=track_issues,
         info=info,
+        track_score=track_score,
         content_hash=content_hash(filename),
         lufs=lufs,
         true_peak_dbtp=true_peak,
@@ -1554,6 +1777,7 @@ def analyze_file(
         stream_info=stream_info,
         is_out_of_phase=is_out_of_phase,
         is_mono_duplicated=is_mono_duplicated,
+        has_mains_hum=has_mains_hum if quiet_interval is not None else None,
         peak_db=peak_db,
         size_mismatch=size_mismatch,
     )
