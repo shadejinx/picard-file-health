@@ -410,23 +410,39 @@ def _rank_weights_from_config(plugin_config) -> dict[str, int]:
     }
 
 
-def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thresholds) -> dict[str, object]:
-    """Runs on a background thread — real decode + measurement work via
-    ffmpeg (see analysis.py), not simulated.
+def _scan_file_health_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
+    """Runs on a background thread — the lightweight, structural-only
+    decode (see analysis.analyze_file_health). No sliders/thresholds:
+    File Health has none by design.
     """
     try:
-        result = analysis.analyze_file(filename, ffmpeg_path=ffmpeg_path, thresholds=thresholds)
+        result = analysis.analyze_file_health(filename, ffmpeg_path=ffmpeg_path)
     except analysis.FfmpegNotFoundError as exc:
-        # Includes FfmpegVersionTooOldError: ffmpeg itself is missing or
-        # unusable — an environment problem, fixed in Options, not a
-        # per-file result. A single specific file failing to decode is
-        # no longer an exception (see analysis.analyze_file's docstring)
-        # — it's the real `file_tier="Broken"` result handled below.
         return {'error': str(exc)}
     return {
         'file_tier': result.file_tier,
-        'track_tier': result.track_tier,
         'file_flags': "; ".join(result.file_issues),
+        'info': "; ".join(result.info),
+        'content_hash': result.content_hash,
+        'codec_name': result.stream_info.codec_name,
+        'profile': result.stream_info.profile,
+        'bitrate_kbps': result.stream_info.bitrate_kbps,
+        'sample_rate': result.stream_info.sample_rate,
+        'channels': result.stream_info.channels,
+    }
+
+
+def _scan_track_health_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thresholds) -> dict[str, object]:
+    """Runs on a background thread — the full perceptual decode (see
+    analysis.analyze_track_health), independent of any File Health scan
+    of the same file.
+    """
+    try:
+        result = analysis.analyze_track_health(filename, ffmpeg_path=ffmpeg_path, thresholds=thresholds)
+    except analysis.FfmpegNotFoundError as exc:
+        return {'error': str(exc)}
+    return {
+        'track_tier': result.track_tier,
         'track_flags': "; ".join(result.track_issues),
         'info': "; ".join(result.info),
         'track_score': result.track_score,
@@ -441,12 +457,12 @@ def _scan_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thres
         'hires_cutoff_db': result.spectral_energy_above_hires_cutoff_db,
         'is_out_of_phase': result.is_out_of_phase,
         'is_mono_duplicated': result.is_mono_duplicated,
+        'peak_db': result.peak_db,
         'codec_name': result.stream_info.codec_name,
         'profile': result.stream_info.profile,
         'bitrate_kbps': result.stream_info.bitrate_kbps,
         'sample_rate': result.stream_info.sample_rate,
         'channels': result.stream_info.channels,
-        'peak_db': result.peak_db,
     }
 
 
@@ -487,14 +503,15 @@ def _decode_bool(raw: str) -> bool | None:
 
 
 
-def _scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
-    """Runs back on the main thread once _scan_one completes."""
+def _file_health_scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
+    """Runs back on the main thread once _scan_file_health_one completes."""
     if error is not None:
-        # Anything _scan_one's own try/except didn't already turn into a
-        # result['error'] string — a genuine bug rather than a handled
-        # ffmpeg/input failure. Still needs to be visible: silently doing
-        # nothing here would leave the file looking permanently "pending"
-        # with no clue why, which is worse than a slightly generic message.
+        # Anything _scan_file_health_one's own try/except didn't already
+        # turn into a result['error'] string — a genuine bug rather than
+        # a handled ffmpeg/input failure. Still needs to be visible:
+        # silently doing nothing here would leave the file looking
+        # permanently "pending" with no clue why, which is worse than a
+        # slightly generic message.
         tagger_instance().window.set_statusbar_message(
             "File Health: scan failed for %(file)s: %(error)s",
             {'file': file.base_filename, 'error': str(error)},
@@ -508,16 +525,46 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
                 echo=None,
             )
         elif 'file_tier' in result:
-            previous_hash = file.metadata['~health_content_hash']
+            previous_hash = file.metadata['~health_file_content_hash']
             changed = bool(previous_hash) and previous_hash != result['content_hash']
             file.metadata['~health_file_tier'] = result['file_tier']
-            file.metadata['~health_track_tier'] = result['track_tier'] or ''
             file.metadata['~health_file_flags'] = result['file_flags']
+            file.metadata['~health_file_info'] = result['info']
+            file.metadata['~health_file_content_hash'] = result['content_hash']
+            file.metadata['~health_file_changed_since_scan'] = '1' if changed else ''
+            file.metadata['~health_codec_name'] = result['codec_name'] or ''
+            file.metadata['~health_profile'] = result['profile'] or ''
+            file.metadata['~health_bitrate_kbps'] = _encode_metric(result['bitrate_kbps'])
+            file.metadata['~health_sample_rate'] = _encode_metric(result['sample_rate'])
+            file.metadata['~health_channels'] = _encode_metric(result['channels'])
+    file.clear_pending()
+    file.update()
+
+
+def _track_health_scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
+    """Runs back on the main thread once _scan_track_health_one completes."""
+    if error is not None:
+        tagger_instance().window.set_statusbar_message(
+            "File Health: scan failed for %(file)s: %(error)s",
+            {'file': file.base_filename, 'error': str(error)},
+            echo=None,
+        )
+    elif result:
+        if 'error' in result:
+            tagger_instance().window.set_statusbar_message(
+                "File Health: %(error)s (configure ffmpeg in Options → Plugins → File Health)",
+                {'error': result['error']},
+                echo=None,
+            )
+        elif 'track_tier' in result:
+            previous_hash = file.metadata['~health_track_content_hash']
+            changed = bool(previous_hash) and previous_hash != result['content_hash']
+            file.metadata['~health_track_tier'] = result['track_tier'] or ''
             file.metadata['~health_track_flags'] = result['track_flags']
-            file.metadata['~health_info'] = result['info']
+            file.metadata['~health_track_info'] = result['info']
             file.metadata['~health_track_score'] = _encode_metric(result['track_score'])
-            file.metadata['~health_content_hash'] = result['content_hash']
-            file.metadata['~health_changed_since_scan'] = '1' if changed else ''
+            file.metadata['~health_track_content_hash'] = result['content_hash']
+            file.metadata['~health_track_changed_since_scan'] = '1' if changed else ''
             file.metadata['~health_bandwidth_hz'] = _encode_metric(result['bandwidth_hz'])
             file.metadata['~health_noise_floor_db'] = _encode_metric(result['noise_floor_db'])
             file.metadata['~health_dr14'] = _encode_metric(result['dr14'])
@@ -528,12 +575,15 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
             file.metadata['~health_hires_cutoff_db'] = _encode_metric(result['hires_cutoff_db'])
             file.metadata['~health_is_out_of_phase'] = _encode_bool(result['is_out_of_phase'])
             file.metadata['~health_is_mono_duplicated'] = _encode_bool(result['is_mono_duplicated'])
+            file.metadata['~health_peak_db'] = _encode_metric(result['peak_db'])
+            # Track Health's own (heavier) decode probes stream info too —
+            # harmless to refresh these shared, scan-type-agnostic fields
+            # even if a File Health scan already set them.
             file.metadata['~health_codec_name'] = result['codec_name'] or ''
             file.metadata['~health_profile'] = result['profile'] or ''
             file.metadata['~health_bitrate_kbps'] = _encode_metric(result['bitrate_kbps'])
             file.metadata['~health_sample_rate'] = _encode_metric(result['sample_rate'])
             file.metadata['~health_channels'] = _encode_metric(result['channels'])
-            file.metadata['~health_peak_db'] = _encode_metric(result['peak_db'])
     file.clear_pending()
     file.update()
 
@@ -541,16 +591,19 @@ def _scan_finished(file: File, result: dict[str, object] | None, error: BaseExce
 def _maybe_auto_scan(api: PluginApi, file: File) -> None:
     """File-post-load hook, always registered — checks the option live so
     toggling it in Options takes effect immediately, no restart needed.
+    File Health only: cheap and structural, appropriate for a bulk/
+    automatic check on every newly added file. Track Health's heavier
+    perceptual decode stays manual/on-demand (see ScanTrackHealthAction).
     """
     if not api.plugin_config['auto_scan']:
         return
     file.set_pending()
     ffmpeg_path = api.plugin_config['ffmpeg_path'] or None
-    thresholds = _thresholds_from_config(api.plugin_config)
     run_task(
-        lambda f=file, p=ffmpeg_path, t=thresholds: _scan_one(f.filename, p, t),
-        lambda result=None, error=None, f=file: _scan_finished(f, result, error),
+        lambda f=file, p=ffmpeg_path: _scan_file_health_one(f.filename, p),
+        lambda result=None, error=None, f=file: _file_health_scan_finished(f, result, error),
     )
+
 
 
 class HealthOptionsPage(OptionsPage):
@@ -561,10 +614,14 @@ class HealthOptionsPage(OptionsPage):
     def __init__(self) -> None:
         super().__init__()
         layout = QtWidgets.QVBoxLayout(self)
-        self.auto_scan_checkbox = QtWidgets.QCheckBox("Automatically scan newly added files", self)
+        self.auto_scan_checkbox = QtWidgets.QCheckBox("Automatically scan File Health for newly added files", self)
         layout.addWidget(self.auto_scan_checkbox)
         auto_scan_detail = QtWidgets.QLabel(
-            "Runs the same background-threaded scan as the manual action.", self
+            "Runs the same background-threaded structural scan as the manual \"Scan File "
+            "Health…\" action. Track Health's heavier perceptual scan always stays manual — "
+            "use \"Scan Track Health…\" from the right-click menu, or the File Health "
+            "Details window.",
+            self,
         )
         auto_scan_detail.setWordWrap(True)
         layout.addWidget(auto_scan_detail)
@@ -598,7 +655,7 @@ class HealthOptionsPage(OptionsPage):
 
         layout.addWidget(ffmpeg_group)
 
-        layout.addWidget(_section_header("File Health Sensitivity"))
+        layout.addWidget(_section_header("Track Health Sensitivity"))
         sensitivity_group, sensitivity_layout = _section_frame()
         sensitivity_intro = QtWidgets.QLabel(
             "These sliders weight how much each check contributes to a file's Track Health "
@@ -770,13 +827,16 @@ class HealthOptionsPage(OptionsPage):
             self.ffmpeg_status_label.setText(f"Found: {resolved} (ffmpeg {found} — OK)")
 
 
-class ScanHealthAction(BaseAction):
-    """Right-click action that triggers the health scan on demand.
+class ScanFileHealthAction(BaseAction):
+    """Right-click action that triggers the File Health scan on demand.
 
-    Manual by default — real analysis needs to decode audio, which is
-    neither instant nor safe to run inline on the file-load callback.
-    An opt-in automatic mode is available via Options (off by default,
-    same background-threaded scan either way). Each scan runs on a
+    Available everywhere (unmatched files, clusters, and matched tracks
+    on either side of the main window) — File Health's cheap structural
+    check is always relevant regardless of matching state. Manual by
+    default — real analysis needs to decode audio, which is neither
+    instant nor safe to run inline on the file-load callback. An opt-in
+    automatic mode is available via Options (off by default, same
+    background-threaded scan either way). Each scan runs on a
     background thread via run_task, same pattern Picard's own AcoustID
     fingerprinting uses for fpcalc.
     """
@@ -793,12 +853,41 @@ class ScanHealthAction(BaseAction):
             echo=None,
         )
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
+        for file in files:
+            file.set_pending()
+            run_task(
+                lambda f=file, p=ffmpeg_path: _scan_file_health_one(f.filename, p),
+                lambda result=None, error=None, f=file: _file_health_scan_finished(f, result, error),
+            )
+
+
+class ScanTrackHealthAction(BaseAction):
+    """Right-click action that triggers the Track Health scan on demand.
+
+    Registered as a track-only action (see enable()) — Track Health's
+    heavier perceptual scan is a right-side-only concern, evaluated in
+    the context of a matched recording, unlike File Health's file-level
+    structural check which applies everywhere.
+    """
+
+    TITLE = "Scan Track Health…"
+
+    def callback(self, objs) -> None:
+        files = list(iter_files_from_objects(objs))
+        if not files:
+            return
+        tagger_instance().window.set_statusbar_message(
+            "Scanning track health for %(count)d file(s)…",
+            {'count': len(files)},
+            echo=None,
+        )
+        ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
         for file in files:
             file.set_pending()
             run_task(
-                lambda f=file, p=ffmpeg_path, t=thresholds: _scan_one(f.filename, p, t),
-                lambda result=None, error=None, f=file: _scan_finished(f, result, error),
+                lambda f=file, p=ffmpeg_path, t=thresholds: _scan_track_health_one(f.filename, p, t),
+                lambda result=None, error=None, f=file: _track_health_scan_finished(f, result, error),
             )
 
 
@@ -1015,8 +1104,8 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
     """Every gate-check column's (state, tooltip) for one file, computed
     live from its stored raw measurements against the *current* slider
     settings — not the tier baked in at last scan time, which only
-    updates on rescan since which gates fired decides whether DR14 was
-    even measured (see CompareResultsPanel's docstring for that split).
+    updates on rescan since these are independent File Health/Track
+    Health scans now (see DetailsPanel's docstring for that split).
     """
     channels = _read_metric(file, '~health_channels')
     peak_db = _read_metric(file, '~health_peak_db')
@@ -1199,8 +1288,12 @@ class SpectrogramDialog(QtWidgets.QDialog):
         self.resize(min(pixmap.width() + 40, 1100), min(pixmap.height() + 60, 800))
 
 
-class CompareResultsPanel(QtWidgets.QDialog):
-    """Non-modal panel listing every file in each shared-identity group.
+class DetailsPanel(QtWidgets.QDialog):
+    """Non-modal panel showing File Health/Track Health details for any
+    selected files — matched duplicates grouped together for comparison
+    (same as before), but also singleton and completely unmatched files,
+    since inspecting one file's own health doesn't require a duplicate
+    to compare it against.
 
     Doesn't declare a winner — presents every file's File Tier, Track
     Tier, and issues side by side, per group, and only bolds whichever
@@ -1217,7 +1310,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("File Health Comparison")
+        self.setWindowTitle("File Health Details")
         self.setModal(False)
         self.resize(1350, 420)
         self._ffmpeg_path = ffmpeg_path
@@ -1231,14 +1324,14 @@ class CompareResultsPanel(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         scan_row = QtWidgets.QHBoxLayout()
-        self.scan_unscanned_button = QtWidgets.QPushButton("Scan Unscanned", self)
-        self.scan_unscanned_button.setToolTip("Scan every file below that hasn't been scanned yet.")
-        self.scan_unscanned_button.clicked.connect(self._scan_unscanned)
-        self.rescan_all_button = QtWidgets.QPushButton("Rescan All", self)
-        self.rescan_all_button.setToolTip("Re-scan every file below, including already-scanned ones.")
-        self.rescan_all_button.clicked.connect(self._rescan_all)
-        scan_row.addWidget(self.scan_unscanned_button)
-        scan_row.addWidget(self.rescan_all_button)
+        self.scan_file_health_button = QtWidgets.QPushButton("Scan File Health", self)
+        self.scan_file_health_button.setToolTip("Scan every file below for File Health (structural).")
+        self.scan_file_health_button.clicked.connect(self._scan_file_health)
+        self.scan_track_health_button = QtWidgets.QPushButton("Scan Track Health", self)
+        self.scan_track_health_button.setToolTip("Scan every file below for Track Health (perceptual).")
+        self.scan_track_health_button.clicked.connect(self._scan_track_health)
+        scan_row.addWidget(self.scan_file_health_button)
+        scan_row.addWidget(self.scan_track_health_button)
         scan_row.addStretch(1)
         layout.addLayout(scan_row)
 
@@ -1318,21 +1411,10 @@ class CompareResultsPanel(QtWidgets.QDialog):
         header.setFont(0, italic)
         self.tree.addTopLevelItem(header)
 
-        unscanned = [f for f in group if not f.metadata['~health_file_tier']]
-        if unscanned:
-            for file in group:
-                file_tier = file.metadata['~health_file_tier'] or "Not yet scanned"
-                track_tier = file.metadata['~health_track_tier'] or ("" if file.metadata['~health_file_tier'] else "Not yet scanned")
-                item = QtWidgets.QTreeWidgetItem([file.base_filename, file_tier, track_tier])
-                item.setData(0, _FILE_ROLE, file)
-                header.addChild(item)
-            header.setExpanded(True)
-            return
-
         ranks = {file: _tier_rank(file) for file in group}
         best_rank = max(ranks.values())
         top_files = [f for f in group if ranks[f] == best_rank]
-        if len(group) < 2:
+        if len(group) < 2 or best_rank == (-1, -1):
             winner = None
         elif len(top_files) == 1:
             winner = top_files[0]
@@ -1342,13 +1424,16 @@ class CompareResultsPanel(QtWidgets.QDialog):
         rank_cells_by_file = _rank_cells(group, self._rank_weights)
 
         for file in group:
-            file_tier = file.metadata['~health_file_tier']
+            file_tier = file.metadata['~health_file_tier'] or "Not yet scanned"
             # A Broken file has no Track Health to show (see
-            # analysis.analyze_file's docstring) — nothing to measure
-            # perceptually, not a blank "not yet scanned" state.
-            track_tier = file.metadata['~health_track_tier'] or (
-                "—" if file_tier == analysis.FILE_TIER_BROKEN else ""
-            )
+            # analysis.analyze_track_health's docstring) — nothing to
+            # measure perceptually, distinct from "not yet scanned".
+            if file.metadata['~health_track_tier']:
+                track_tier = file.metadata['~health_track_tier']
+            elif file.metadata['~health_file_tier'] == analysis.FILE_TIER_BROKEN:
+                track_tier = "—"
+            else:
+                track_tier = "Not yet scanned"
             format_text, format_tooltip = _format_cell(file)
             item = QtWidgets.QTreeWidgetItem([file.base_filename, file_tier, track_tier, format_text])
             item.setToolTip(3, format_tooltip)
@@ -1370,9 +1455,14 @@ class CompareResultsPanel(QtWidgets.QDialog):
                 self._paint_matrix_cell(item, col, state, tooltip)
                 col += 1
 
-            info_parts = file.metadata['~health_info'].split("; ") if file.metadata['~health_info'] else []
-            if file.metadata['~health_changed_since_scan']:
-                info_parts.insert(0, "Changed since last scan")
+            info_parts = []
+            for info_key in ('~health_file_info', '~health_track_info'):
+                if file.metadata[info_key]:
+                    info_parts.extend(file.metadata[info_key].split("; "))
+            if file.metadata['~health_file_changed_since_scan']:
+                info_parts.insert(0, "File Health: changed since last scan")
+            if file.metadata['~health_track_changed_since_scan']:
+                info_parts.insert(0, "Track Health: changed since last scan")
             notes = "; ".join(info_parts)
             item.setText(col, notes or "—")
             if notes:
@@ -1411,7 +1501,7 @@ class CompareResultsPanel(QtWidgets.QDialog):
     def _all_files(self) -> list[File]:
         return [file for _, group in self._groups for file in group]
 
-    def _run_scan(self, files: list[File]) -> None:
+    def _run_file_health_scan(self, files: list[File]) -> None:
         if not files:
             return
         tagger_instance().window.set_statusbar_message(
@@ -1420,30 +1510,48 @@ class CompareResultsPanel(QtWidgets.QDialog):
             echo=None,
         )
         ffmpeg_path = self._ffmpeg_path
+        for file in files:
+            file.set_pending()
+            run_task(
+                lambda f=file, p=ffmpeg_path: _scan_file_health_one(f.filename, p),
+                lambda result=None, error=None, f=file: self._on_file_health_scan_finished(f, result, error),
+            )
+
+    def _run_track_health_scan(self, files: list[File]) -> None:
+        if not files:
+            return
+        tagger_instance().window.set_statusbar_message(
+            "Scanning track health for %(count)d file(s)…",
+            {'count': len(files)},
+            echo=None,
+        )
+        ffmpeg_path = self._ffmpeg_path
         thresholds = self._thresholds
         for file in files:
             file.set_pending()
             run_task(
-                lambda f=file, p=ffmpeg_path, t=thresholds: _scan_one(f.filename, p, t),
-                lambda result=None, error=None, f=file: self._on_scan_finished(f, result, error),
+                lambda f=file, p=ffmpeg_path, t=thresholds: _scan_track_health_one(f.filename, p, t),
+                lambda result=None, error=None, f=file: self._on_track_health_scan_finished(f, result, error),
             )
 
-    def _on_scan_finished(self, file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
-        _scan_finished(file, result, error)
+    def _on_file_health_scan_finished(self, file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
+        _file_health_scan_finished(file, result, error)
         self.refresh()
 
-    def _scan_unscanned(self) -> None:
-        self._run_scan([f for f in self._all_files() if not f.metadata['~health_file_tier']])
+    def _on_track_health_scan_finished(self, file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
+        _track_health_scan_finished(file, result, error)
+        self.refresh()
 
-    def _rescan_all(self) -> None:
-        self._run_scan(self._all_files())
+    def _scan_file_health(self) -> None:
+        self._run_file_health_scan(self._all_files())
+
+    def _scan_track_health(self) -> None:
+        self._run_track_health_scan(self._all_files())
 
     def _update_scan_button_states(self) -> None:
-        files = self._all_files()
-        self.rescan_all_button.setEnabled(bool(files))
-        self.scan_unscanned_button.setEnabled(
-            any(not f.metadata['~health_file_tier'] for f in files)
-        )
+        has_files = bool(self._all_files())
+        self.scan_file_health_button.setEnabled(has_files)
+        self.scan_track_health_button.setEnabled(has_files)
 
     def _current_file(self) -> File | None:
         items = self.tree.selectedItems()
@@ -1580,50 +1688,69 @@ def _track_label(track: Track) -> str:
     return f"{artist} – {title}" if artist else title
 
 
-def _open_compare_panel(
+def _group_files_for_details(files: list[File]) -> list[tuple[str, list[File]]]:
+    """Groups by Track when matched (preserves duplicate-comparison —
+    same Track means Picard already considers them the same recording),
+    otherwise one singleton group per unmatched file — there's nothing
+    to group them by, but the whole point of the Details window is
+    being able to inspect *any* file's health, not just ones with a
+    confirmed duplicate.
+    """
+    by_track = _group_by_track(files)
+    groups: list[tuple[str, list[File]]] = []
+    grouped_files: set[File] = set()
+    for track, group in by_track.items():
+        groups.append((_track_label(track), group))
+        grouped_files.update(group)
+    for f in files:
+        if f not in grouped_files:
+            groups.append((f.base_filename, [f]))
+    return groups
+
+
+def _open_details_panel(
     files: list[File],
     parent: QtWidgets.QWidget,
     ffmpeg_path: str | None,
     thresholds: analysis.Thresholds,
     rank_weights: dict[str, int],
-) -> CompareResultsPanel | None:
-    """Groups by Track (Picard's own matching decision, not our own tag
-    comparison), opens the panel if there's anything to compare.
+) -> DetailsPanel | None:
+    """Groups by Track where matched, singleton otherwise (see
+    _group_files_for_details), opens the panel if any files were given.
     """
-    groups = {track: group for track, group in _group_by_track(files).items() if len(group) > 1}
+    groups = _group_files_for_details(files)
     if not groups:
         return None
-    panel = CompareResultsPanel(ffmpeg_path, thresholds, rank_weights, parent)
-    for track, group in groups.items():
-        panel.add_group(_track_label(track), group)
+    panel = DetailsPanel(ffmpeg_path, thresholds, rank_weights, parent)
+    for label, group in groups:
+        panel.add_group(label, group)
     panel.show()
     return panel
 
 
-class CompareHealthAction(BaseAction):
-    """Right-click action that compares files Picard has matched to the
-    same track, within the current selection.
-
-    Grouping reuses Picard's own matching decision (which track a file is
-    linked to, decided via its configured match_min_similarity/margin
-    thresholds) rather than a separate tag-based identity check — if
-    Picard considers two files the same recording, so do we, and never
-    disagrees with what the main window already shows grouped together.
+class ShowFileHealthDetailsAction(BaseAction):
+    """Right-click action that opens the File Health Details window for
+    the current selection — any files, not just ones with a confirmed
+    duplicate. Files matched to the same Track are still grouped
+    together for side-by-side comparison (Picard's own matching
+    decision, not our own tag comparison); everything else gets its own
+    row.
 
     Doesn't declare a hard winner in the results — only bolds whichever
     file scored higher within its group (File Health rank first, then
     Track Health rank, then a user-weighted rank-sum across bandwidth/
     noise-floor/dynamic-range/stereo-coherence for files tied on both
-    tiers — see _composite_winner), as a subtle cue,
-    earlier: a perceptual-distance metric like ViSQOL/Zimtohrli would
-    tell you the files differ, but not which one is better; the
-    directional gate-field reasons and continuous fidelity axes (real,
-    from analysis.analyze_file, stored in ~health_file_flags/
-    ~health_track_flags and the ~health_* metric fields) are what
-    actually inform that judgment.
+    tiers — see _composite_winner), as a subtle cue, leaving the actual
+    decision to the user. Matches the design decided earlier: a
+    perceptual-distance metric like ViSQOL/Zimtohrli would tell you the
+    files differ, but not which one is better; the directional gate-
+    field reasons and continuous fidelity axes (real, from
+    analysis.analyze_file_health/analyze_track_health, stored in
+    ~health_file_flags/~health_track_flags and the ~health_* metric
+    fields) are what actually inform that judgment.
     """
 
-    TITLE = "Compare File Health…"
+    TITLE = "File Health Details…"
 
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
@@ -1631,95 +1758,123 @@ class CompareHealthAction(BaseAction):
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
         rank_weights = _rank_weights_from_config(self.api.plugin_config)
-        panel = _open_compare_panel(files, window, ffmpeg_path, thresholds, rank_weights)
+        panel = _open_details_panel(files, window, ffmpeg_path, thresholds, rank_weights)
         if panel is None:
-            window.set_statusbar_message(
-                "None of the selected files are matched to the same track.",
-                echo=None,
-            )
+            window.set_statusbar_message("No files selected.", echo=None)
             return
         self._panel = panel
 
 
-class CompareAllHealthAction(BaseAction):
-    """Tools-menu action: compares every matched-duplicate track across the
-    entire loaded library at once — the "many files" case, not limited to
-    a manual selection.
+class ShowAllFileHealthDetailsAction(BaseAction):
+    """Tools-menu action: opens the File Health Details window for every
+    file currently loaded in Picard at once — the "whole library" case,
+    not limited to a manual selection.
     """
 
-    TITLE = "Compare All File Health…"
+    TITLE = "All File Health Details…"
 
     def callback(self, objs) -> None:
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
         rank_weights = _rank_weights_from_config(self.api.plugin_config)
-        panel = _open_compare_panel(_all_loaded_files(), window, ffmpeg_path, thresholds, rank_weights)
+        panel = _open_details_panel(_all_loaded_files(), window, ffmpeg_path, thresholds, rank_weights)
         if panel is None:
-            window.set_statusbar_message(
-                "No tracks in the library currently have more than one matched file.",
-                echo=None,
-            )
+            window.set_statusbar_message("No files currently loaded in Picard.", echo=None)
             return
         self._panel = panel
 
 
-class HealthProvider(ColumnValueProvider, DelegateProvider):
-    """Column that displays both health tiers as a pair of bookmark icons
-    with an itemized-issues tooltip.
+class FileHealthProvider(ColumnValueProvider, DelegateProvider):
+    """Column that displays File Health tier as a bookmark icon with an
+    itemized-issues tooltip. Registered on both sides of the main window
+    (see enable()) — File Health's structural check is always relevant
+    regardless of matching state.
     """
 
     def __init__(self) -> None:
-        self._delegate_class = HealthColumnDelegate
+        self._delegate_class = FileHealthColumnDelegate
 
     def evaluate(self, obj: Item) -> str:
-        """Combined sort key, worst-to-best: File Health rank first (a
-        structural defect is a harder, more objective fact than a
-        perceptual one — see _tier_rank), Track Health rank second.
-        Zero-padded so lexicographic (TEXT) sorting matches numeric
-        order for every rank pair.
-        """
+        """Tier index as a string, for sorting worst-to-best."""
         column_method = getattr(obj, 'column', None)
         if not callable(column_method):
             return "-1"
         try:
-            file_rank = FILE_TIERS.index(column_method('~health_file_tier'))
+            return str(FILE_TIERS.index(column_method('~health_file_tier')))
         except ValueError:
             return "-1"
-        try:
-            track_rank = TRACK_TIERS.index(column_method('~health_track_tier'))
-        except ValueError:
-            track_rank = -1
-        return f"{file_rank:02d}{track_rank + 1:02d}"
 
     def get_health_info(self, obj: Item) -> dict[str, object] | None:
         column_method = getattr(obj, 'column', None)
         if not callable(column_method):
             return None
-        file_tier = column_method('~health_file_tier')
-        if not file_tier:
+        tier = column_method('~health_file_tier')
+        if not tier:
             return None
-        track_tier = column_method('~health_track_tier')
-        stored_file_flags = column_method('~health_file_flags')
-        stored_track_flags = column_method('~health_track_flags')
-        stored_info = column_method('~health_info')
+        stored_flags = column_method('~health_file_flags')
+        stored_info = column_method('~health_file_info')
         return {
-            'file_tier': file_tier,
-            'track_tier': track_tier or None,
-            'file_issues': stored_file_flags.split("; ") if stored_file_flags else [],
-            'track_issues': stored_track_flags.split("; ") if stored_track_flags else [],
+            'tier': tier,
+            'file_tier': tier,
+            'issues': stored_flags.split("; ") if stored_flags else [],
             'info': stored_info.split("; ") if stored_info else [],
-            'changed_since_scan': bool(column_method('~health_changed_since_scan')),
+            'changed_since_scan': bool(column_method('~health_file_changed_since_scan')),
         }
 
     def get_delegate_class(self) -> type[QtWidgets.QStyledItemDelegate]:
         return self._delegate_class
 
 
-class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
-    """Renders both health tiers as a pair of bookmark icons (File Health
-    left, Track Health right); hover shows every issue from both.
+class TrackHealthProvider(ColumnValueProvider, DelegateProvider):
+    """Column that displays Track Health tier as a bookmark icon with an
+    itemized-issues tooltip. Registered on the right side only (see
+    enable()) — Track Health is evaluated in the context of a matched
+    recording, unlike File Health's file-level structural check.
     """
+
+    def __init__(self) -> None:
+        self._delegate_class = TrackHealthColumnDelegate
+
+    def evaluate(self, obj: Item) -> str:
+        column_method = getattr(obj, 'column', None)
+        if not callable(column_method):
+            return "-1"
+        try:
+            return str(TRACK_TIERS.index(column_method('~health_track_tier')))
+        except ValueError:
+            return "-1"
+
+    def get_health_info(self, obj: Item) -> dict[str, object] | None:
+        column_method = getattr(obj, 'column', None)
+        if not callable(column_method):
+            return None
+        file_tier = column_method('~health_file_tier')
+        track_tier = column_method('~health_track_tier')
+        if not file_tier and not track_tier:
+            return None
+        stored_flags = column_method('~health_track_flags')
+        stored_info = column_method('~health_track_info')
+        return {
+            'tier': track_tier or None,
+            'file_tier': file_tier or None,
+            'issues': stored_flags.split("; ") if stored_flags else [],
+            'info': stored_info.split("; ") if stored_info else [],
+            'changed_since_scan': bool(column_method('~health_track_changed_since_scan')),
+        }
+
+    def get_delegate_class(self) -> type[QtWidgets.QStyledItemDelegate]:
+        return self._delegate_class
+
+
+class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
+    """Shared single-icon paint + tooltip logic for one health tier
+    column. Subclasses set `_icon_level_map`/`_label` for which tier
+    scale and heading text to use.
+    """
+
+    _icon_level_map: dict[str, int] = {}
+    _label: str = ""
 
     def _get_info(self, index: QtCore.QModelIndex) -> dict[str, object] | None:
         tree_widget = self.parent()
@@ -1755,46 +1910,36 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         info = self._get_info(index)
         if not info:
             return
+        level = self._icon_level_map.get(info.get('tier'))
+        if level is None:
+            return
         icon_size = 16
-        icon_margin = 2
+        x = option.rect.x() + (option.rect.width() - icon_size) // 2
         y = option.rect.y() + (option.rect.height() - icon_size) // 2
-        file_level = FILE_TIER_ICON_LEVEL.get(info['file_tier'])
-        if file_level is not None:
-            x = option.rect.x() + icon_margin
-            match_icons[file_level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
-        track_tier = info.get('track_tier')
-        track_level = TRACK_TIER_ICON_LEVEL.get(track_tier) if track_tier else None
-        if track_level is not None:
-            x = option.rect.x() + icon_margin * 2 + icon_size
-            match_icons[track_level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
+        match_icons[level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
 
     def _format_tooltip(self, info: dict[str, object]) -> str:
-        file_tier = info['file_tier']
-        track_tier = info.get('track_tier')
-        parts = [f"<b>File Health: {file_tier}</b>"]
+        tier = info.get('tier')
+        issues = info['issues']
+        notes = info.get('info') or []
+        if tier is not None:
+            header = f"<b>{self._label}: {tier}</b>"
+        elif info.get('file_tier') == analysis.FILE_TIER_BROKEN:
+            header = f"<b>{self._label}: N/A</b> — file won't decode"
+        else:
+            header = f"<b>{self._label}: not yet scanned</b>"
+        parts = [header]
         if info.get('changed_since_scan'):
             parts.append(
                 "<div style='color:#b7950b;'>Audio content changed since last scan</div>"
             )
-        file_issues = info['file_issues']
-        if file_issues:
-            items = "".join(f"<li>{issue}</li>" for issue in file_issues)
+        if issues:
+            items = "".join(f"<li>{issue}</li>" for issue in issues)
             parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
-        else:
-            parts.append("<br>No structural defects")
-        if track_tier is None:
-            parts.append("<br><b>Track Health: not measured</b> — file won't decode")
-        else:
-            parts.append(f"<br><b>Track Health: {track_tier}</b>")
-            track_issues = info['track_issues']
-            if track_issues:
-                items = "".join(f"<li>{issue}</li>" for issue in track_issues)
-                parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
-            else:
-                parts.append("<br>No perceptible issues")
-        notes = info.get('info') or []
+        elif tier is not None:
+            parts.append("<br>No issues detected")
         if notes:
-            # Informational only — doesn't affect either tier (e.g. mono
+            # Informational only — doesn't affect the tier (e.g. mono
             # content in a stereo container isn't a defect, just a note).
             note_items = "".join(f"<li>{note}</li>" for note in notes)
             parts.append(
@@ -1820,26 +1965,55 @@ class HealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ) -> QtCore.QSize:
-        return QtCore.QSize(90, 20)
+        return QtCore.QSize(50, 20)
+
+
+class FileHealthColumnDelegate(_SingleHealthColumnDelegate):
+    _icon_level_map = FILE_TIER_ICON_LEVEL
+    _label = "File Health"
+
+
+class TrackHealthColumnDelegate(_SingleHealthColumnDelegate):
+    _icon_level_map = TRACK_TIER_ICON_LEVEL
+    _label = "Track Health"
 
 
 # Registered at import time, not inside enable(), to match how Picard's own
 # core columns register (ALBUMVIEW_COLUMNS.insert(...) at columns.py import
 # time) — this must happen before any tree view builds its header, which
 # plugin enable() apparently runs too late for.
-_HEALTH_COLUMN = make_delegate_column(
-    "Health",
-    '~health_combined_tier',
-    HealthProvider(),
-    width=90,
-    size=QtCore.QSize(80, 16),
+_FILE_HEALTH_COLUMN = make_delegate_column(
+    "File Health",
+    '~health_file_tier',
+    FileHealthProvider(),
+    width=50,
+    size=QtCore.QSize(40, 16),
 )
-_HEALTH_COLUMN.is_default = True
-registry.register(_HEALTH_COLUMN, add_to={'FILE_VIEW', 'ALBUM_VIEW'})
+_FILE_HEALTH_COLUMN.is_default = True
+registry.register(_FILE_HEALTH_COLUMN, add_to={'FILE_VIEW', 'ALBUM_VIEW'})
+
+# Right side (ALBUM_VIEW) only — Track Health is evaluated in the
+# context of a matched recording; the left/unmatched-file view never
+# shows this column at all (see enable()'s action registration for the
+# matching menu-item split).
+_TRACK_HEALTH_COLUMN = make_delegate_column(
+    "Track Health",
+    '~health_track_tier',
+    TrackHealthProvider(),
+    width=50,
+    size=QtCore.QSize(40, 16),
+)
+_TRACK_HEALTH_COLUMN.is_default = True
+registry.register(_TRACK_HEALTH_COLUMN, add_to={'ALBUM_VIEW'})
+
+_HEALTH_COLUMNS = (
+    (_FILE_HEALTH_COLUMN, FileHealthColumnDelegate),
+    (_TRACK_HEALTH_COLUMN, TrackHealthColumnDelegate),
+)
 
 
 def _install_delegate_on_live_views() -> None:
-    """Attach the icon-painting delegate to any already-open tree widgets.
+    """Attach the icon-painting delegates to any already-open tree widgets.
 
     ``setItemDelegateForColumn`` is only ever called once, inside each tree
     view's own ``_init_header()``, over whatever columns existed at that
@@ -1857,13 +2031,16 @@ def _install_delegate_on_live_views() -> None:
         columns = getattr(widget, 'columns', None)
         if columns is None:
             continue
-        try:
-            index = list(columns).index(_HEALTH_COLUMN)
-        except ValueError:
-            continue
+        columns_list = list(columns)
         set_delegate = getattr(widget, 'setItemDelegateForColumn', None)
-        if callable(set_delegate):
-            set_delegate(index, HealthColumnDelegate(widget))
+        if not callable(set_delegate):
+            continue
+        for column, delegate_class in _HEALTH_COLUMNS:
+            try:
+                index = columns_list.index(column)
+            except ValueError:
+                continue
+            set_delegate(index, delegate_class(widget))
 
 
 def enable(api: PluginApi) -> None:
@@ -1890,24 +2067,34 @@ def enable(api: PluginApi) -> None:
         title="File Health flags",
     )
     api.register_script_variable(
-        '_health_track_flags',
-        documentation="Itemized list of perceptual (Track Health) issues found by the last scan.",
-        title="Track Health flags",
+        '_health_file_info',
+        documentation="Informational notes from the last File Health scan that don't affect its tier.",
+        title="File Health info",
     )
     api.register_script_variable(
-        '_health_info',
-        documentation="Informational notes that don't affect either health tier (e.g. mono content in a stereo container).",
-        title="Health info",
+        '_health_track_info',
+        documentation="Informational notes from the last Track Health scan that don't affect its tier (e.g. mono content in a stereo container).",
+        title="Track Health info",
     )
     api.register_script_variable(
-        '_health_content_hash',
-        documentation="Hash of the file's bytes as of the last health scan.",
-        title="Health content hash",
+        '_health_file_content_hash',
+        documentation="Hash of the file's bytes as of the last File Health scan.",
+        title="File Health content hash",
     )
     api.register_script_variable(
-        '_health_changed_since_scan',
-        documentation="Non-empty if the file's bytes changed since the last health scan.",
-        title="Health changed since scan",
+        '_health_track_content_hash',
+        documentation="Hash of the file's bytes as of the last Track Health scan.",
+        title="Track Health content hash",
+    )
+    api.register_script_variable(
+        '_health_file_changed_since_scan',
+        documentation="Non-empty if the file's bytes changed since the last File Health scan.",
+        title="File Health changed since scan",
+    )
+    api.register_script_variable(
+        '_health_track_changed_since_scan',
+        documentation="Non-empty if the file's bytes changed since the last Track Health scan.",
+        title="Track Health changed since scan",
     )
     api.plugin_config.register_option('auto_scan', False)
     api.plugin_config.register_option('ffmpeg_path', '')
@@ -1923,14 +2110,18 @@ def enable(api: PluginApi) -> None:
     api.register_file_post_load_processor(_maybe_auto_scan)
     api.register_options_page(HealthOptionsPage)
 
-    api.register_file_action(ScanHealthAction)
-    api.register_track_action(ScanHealthAction)
-    api.register_cluster_action(ScanHealthAction)
+    # File Health: available everywhere — unmatched files/clusters on
+    # the left, and matched files/tracks on the right. This is the ONLY
+    # scan action the left side ever shows (see the column registration
+    # above for the matching column-visibility split).
+    api.register_file_action(ScanFileHealthAction)
+    api.register_cluster_action(ScanFileHealthAction)
+    api.register_track_action(ScanFileHealthAction)
 
-    api.register_file_action(CompareHealthAction)
-    api.register_track_action(CompareHealthAction)
-    api.register_cluster_action(CompareHealthAction)
-    api.register_tools_menu_action(CompareAllHealthAction)
+    # Track Health and Details: right side (matched-track context) only.
+    api.register_track_action(ScanTrackHealthAction)
+    api.register_track_action(ShowFileHealthDetailsAction)
+    api.register_tools_menu_action(ShowAllFileHealthDetailsAction)
 
     # Force any already-open tree views to rebuild their header (column
     # count + labels) and recompute every existing row's cell text for the
@@ -1951,4 +2142,5 @@ def enable(api: PluginApi) -> None:
 
 def disable() -> None:
     """Called when the plugin is disabled."""
-    registry.unregister(_HEALTH_COLUMN.key)
+    registry.unregister(_FILE_HEALTH_COLUMN.key)
+    registry.unregister(_TRACK_HEALTH_COLUMN.key)
