@@ -782,10 +782,9 @@ def _detect_corruption_signature(merged_stderr: str) -> str | None:
     if count == 0:
         return None
     return (
-        f"Possible data corruption — {count} decoded audio block"
-        f"{'s' if count != 1 else ''} had an internally inconsistent bit-reservoir "
-        "pointer (ffmpeg's own decoder-level sanity check), consistent with a "
-        "scattered bit error rather than a normal encoding quirk"
+        f"Possible data corruption — {count} part{'s' if count != 1 else ''} of the "
+        "audio decoded incorrectly, consistent with random data damage rather than a "
+        "normal encoding quirk"
     )
 
 
@@ -1044,7 +1043,7 @@ def _detect_tag_structure_error(filename: str) -> str | None:
     try:
         mutagen.File(filename)
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
-        return f"{type(exc).__name__}: {exc}"
+        return f"The file's tag data is malformed and couldn't be fully read (technical detail: {type(exc).__name__}: {exc})"
     return None
 
 
@@ -1139,9 +1138,9 @@ def _bitrate_transparency_note(stream_info: StreamInfo) -> str | None:
         return None
     label = {'mp3': 'MP3', 'aac': 'AAC', 'vorbis': 'Vorbis', 'opus': 'Opus'}[codec_name]
     return (
-        f"{kbps}kbps {label} — below the ~{threshold}kbps commonly considered "
-        f"transparent for {label} (HydrogenAudio/Xiph consensus); may have "
-        "audible compression artifacts on some material"
+        f"{kbps}kbps {label} — below the ~{threshold}kbps generally considered enough "
+        f"to sound identical to the original for {label}; may have audible quality "
+        "loss on some material"
     )
 
 
@@ -1232,9 +1231,9 @@ def _detect_hum(ffmpeg: str, filename: str, quiet_interval: tuple[float, float] 
         elevation = hum_rms - control_rms
         if elevation >= HUM_ELEVATION_THRESHOLD_DB:
             return (
-                f"Possible mains hum at {mains_hz}Hz — {elevation:.0f}dB above the "
-                f"surrounding spectrum during a {duration:.1f}s quiet passage, "
-                "persisting where the music itself has dropped out"
+                f"Possible mains hum (electrical buzz) at {mains_hz}Hz — clearly louder "
+                f"than the surrounding sound during a {duration:.1f}s quiet passage where "
+                "the music itself had stopped"
             )
     return None
 
@@ -1374,14 +1373,14 @@ def generate_spectrogram(
 
 
 def _tunable(slider_name: str) -> str:
-    """Appended to a gate issue's message so a plain-language reason
-    always points at the exact Options-page control that governs it —
-    never a defect reported with no way to know it's adjustable at all.
-    Plain text, not markup: this string ends up both in the compare
-    panel's tooltip and in the `_health_flags` script variable, so it
-    has to read fine in either.
+    """Appended to a Track Health issue's message so a plain-language
+    reason always points at the exact Options-page control that governs
+    it — never a defect reported with no way to know it's adjustable at
+    all. Plain text, not markup: this string ends up both in the
+    details panel's tooltip and in the `_health_track_flags` script
+    variable, so it has to read fine in either.
     """
-    return f' (Adjust in Options \u2192 File Health: "{slider_name}" slider)'
+    return f' (Adjust in Options \u2192 File Health: "{slider_name}" slider under "Track Health Sensitivity")'
 
 
 def _run_corruption_decode(ffmpeg: str, filename: str) -> tuple[str, int]:
@@ -1581,15 +1580,15 @@ def analyze_file_health(filename: str, ffmpeg_path: str | None = None) -> FileHe
         actual_mb = size_mismatch.actual_bytes / 1_000_000
         if size_mismatch.direction == 'extra_data':
             file_issues.append(
-                f"File has {size_mismatch.ratio * 100:.0f}% more audio data than its own VBR header "
-                f"accounts for ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
-                "consistent with extra data appended after the original track ended"
+                f"File has {size_mismatch.ratio * 100:.0f}% more audio data than the file itself "
+                f"expects ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB the file describes) — "
+                "extra data may have been added after the track originally ended"
             )
         else:
             file_issues.append(
-                f"File has {size_mismatch.ratio * 100:.0f}% less audio data than its own VBR header "
-                f"declares ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB declared) — "
-                "consistent with the file being truncated or rewritten after encoding"
+                f"File has {size_mismatch.ratio * 100:.0f}% less audio data than the file itself "
+                f"expects ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB the file describes) — "
+                "the file may have been cut short or altered after it was originally encoded"
             )
 
     if _detect_artwork_corruption(ffmpeg, ffprobe, filename):
@@ -1742,8 +1741,9 @@ def analyze_track_health(
         # to say twice, but true-peak-only is a genuinely distinct finding
         # (inter-sample overshoot with no sample actually at full scale).
         track_issues.append(
-            f"Volume peaks go past full scale between samples (True Peak {true_peak:+.1f}dBTP) "
-            f"— can distort on some playback equipment{_tunable('True Peak')}"
+            f"Volume briefly peaks past full scale between samples (measured {true_peak:+.1f}dB "
+            f"above the ceiling) — can distort on some playback equipment even though no single "
+            f"sample itself clips{_tunable('True Peak')}"
         )
 
     has_signal = peak_db is not None and peak_db > MIN_PEAK_DB_FOR_SPECTRAL_CHECK
@@ -1828,7 +1828,7 @@ def analyze_track_health(
 
     ok_threshold = DR14_OK_THRESHOLD - thresholds.dr14_shift
     if dr14 is not None and dr14 < ok_threshold:
-        track_issues.append(f"Compressed master (DR{dr14}){_tunable('Compression Tolerance')}")
+        track_issues.append(f"Dynamic range is heavily compressed (rated DR{dr14}) — quiet and loud parts sound similarly loud{_tunable('Compression Tolerance')}")
 
     track_score = compute_track_score(
         TrackHealthInputs(

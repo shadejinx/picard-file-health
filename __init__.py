@@ -279,15 +279,15 @@ _CLIP_DEFAULT_INDEX = 6  # matches analysis.MIN_FLAT_FACTOR_FOR_CLIPPING (1.0)
 
 _TRUE_PEAK_STEPS: list[tuple[float, str]] = [
     (3.0, "Only catches extreme overs — several dB past full volume."),
-    (2.0, "Catches clearly audible inter-sample overshoot."),
-    (1.5, "Catches overshoot well beyond normal mastering tolerance."),
-    (1.0, "Catches overshoot beyond typical mastering headroom."),
-    (0.8, "Slightly stricter than the meter's own accuracy margin."),
-    (0.6, "Balanced default — just past the true-peak meter's own accuracy limit."),
-    (0.4, "Tighter than the meter's documented accuracy — may flag compliant masters."),
-    (0.2, "Close to full scale — likely to flag normally-mastered loud tracks."),
-    (0.1, "Right at the meter's own noise floor — expect false positives."),
-    (0.0, "Flags anything technically over full scale, including measurement noise."),
+    (2.0, "Catches clearly audible overshoot between samples."),
+    (1.5, "Catches overshoot well beyond what's normal for a finished master."),
+    (1.0, "Catches overshoot beyond typical headroom for a finished master."),
+    (0.8, "Slightly stricter than this measurement's own margin of error."),
+    (0.6, "Balanced default — just past this measurement's own margin of error."),
+    (0.4, "Tighter than this measurement can reliably tell apart — may flag otherwise-fine masters."),
+    (0.2, "Close to full volume — likely to flag normally loud tracks."),
+    (0.1, "Right at the edge of measurement noise — expect false positives."),
+    (0.0, "Flags anything technically over full volume, including measurement noise."),
 ]
 _TRUE_PEAK_DEFAULT_INDEX = 5  # matches analysis.TRUE_PEAK_THRESHOLD_DBTP (0.6)
 
@@ -329,15 +329,15 @@ _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
 # Lenient (positive shift) -> strict (negative shift), matching every
 # other slider's left-to-right convention.
 _DR14_SHIFT_STEPS: list[tuple[float, str]] = [
-    (4.0, "Very lenient — a DR4 master won't read as Poor."),
-    (3.0, "Lenient — a DR5 master won't read as Poor."),
-    (2.0, "Somewhat lenient — a DR6 master won't read as Poor."),
-    (1.0, "Slightly lenient — a DR7 master won't read as Poor."),
-    (0.0, "Balanced default — matches the TT DR Offline Meter manual's own documented scale."),
-    (-1.0, "Slightly stricter — needs DR9 to clear \"Poor\"."),
-    (-2.0, "Stricter — needs DR10 to clear \"Poor\"."),
-    (-3.0, "Strict — needs DR11 to clear \"Poor\"."),
-    (-4.0, "Very strict — only DR12+ masters avoid \"Poor\"."),
+    (4.0, "Very lenient — a very squashed-sounding track (DR4) won't read as Poor."),
+    (3.0, "Lenient — a heavily squashed track (DR5) won't read as Poor."),
+    (2.0, "Somewhat lenient — a squashed track (DR6) won't read as Poor."),
+    (1.0, "Slightly lenient — a fairly squashed track (DR7) won't read as Poor."),
+    (0.0, "Balanced default — matches the official reference scale for this measurement."),
+    (-1.0, "Slightly stricter — needs a bit more dynamic range (DR9) to clear \"Poor\"."),
+    (-2.0, "Stricter — needs noticeably more dynamic range (DR10) to clear \"Poor\"."),
+    (-3.0, "Strict — needs a lot more dynamic range (DR11) to clear \"Poor\"."),
+    (-4.0, "Very strict — only tracks with very open dynamics (DR12+) avoid \"Poor\"."),
 ]
 _DR14_SHIFT_DEFAULT_INDEX = 4  # matches analysis.Thresholds.dr14_shift default (0)
 
@@ -617,9 +617,9 @@ class HealthOptionsPage(OptionsPage):
         self.auto_scan_checkbox = QtWidgets.QCheckBox("Automatically scan File Health for newly added files", self)
         layout.addWidget(self.auto_scan_checkbox)
         auto_scan_detail = QtWidgets.QLabel(
-            "Runs the same background-threaded structural scan as the manual \"Scan File "
-            "Health…\" action. Track Health's heavier perceptual scan always stays manual — "
-            "use \"Scan Track Health…\" from the right-click menu, or the File Health "
+            "Runs the same quick check as the manual \"Scan File Health…\" action, just "
+            "automatically. Track Health's slower, more detailed scan always stays manual "
+            "— use \"Scan Track Health…\" from the right-click menu, or the File Health "
             "Details window.",
             self,
         )
@@ -674,7 +674,7 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addSpacing(8)
 
         self.true_peak_slider = _SensitivitySlider(
-            "True Peak", _TRUE_PEAK_STEPS, _TRUE_PEAK_DEFAULT_INDEX, fmt="{:+.1f} dBTP", parent=self, tag="TPK",
+            "True Peak", _TRUE_PEAK_STEPS, _TRUE_PEAK_DEFAULT_INDEX, fmt="{:+.1f} dB", parent=self, tag="TPK",
         )
         sensitivity_layout.addWidget(self.true_peak_slider)
         sensitivity_layout.addSpacing(8)
@@ -708,11 +708,10 @@ class HealthOptionsPage(OptionsPage):
         layout.addWidget(_section_header("Comparison Priority"))
         priority_group, priority_layout = _section_frame()
         priority_intro = QtWidgets.QLabel(
-            "When two files score the same tier, the compare panel breaks the tie using "
-            "these weights — each axis only contributes its relative rank among the tied "
-            "files (1st, 2nd, ...), scaled by its weight here, never a raw number "
-            "combined across unrelated units. Set a weight to 0 to ignore that axis "
-            "entirely.",
+            "When two files land in the same tier, the Details window uses these settings "
+            "to help pick a favorite — each one only compares files by rank (1st, 2nd, "
+            "...), never by mixing raw numbers that use different units. Set any one to 0 "
+            "to ignore it completely.",
             self,
         )
         priority_intro.setWordWrap(True)
@@ -818,9 +817,9 @@ class HealthOptionsPage(OptionsPage):
             self.ffmpeg_status_label.setText(
                 "<div style='color:#c0392b;'>Found: "
                 f"{resolved} (ffmpeg {found} — <b>too old</b>. File Health needs "
-                f"ffmpeg {min_version} or newer for loudnorm/DR14/phase analysis; "
-                "scans against this binary will fail with an explanatory error. "
-                "Use Get ffmpeg… below for a current build.)</div>"
+                f"ffmpeg {min_version} or newer to run its checks; scans with this "
+                "version will fail with an explanatory error. Use Get ffmpeg… below "
+                "for a current build.)</div>"
             )
         else:
             found = '.'.join(map(str, version))
@@ -1120,7 +1119,7 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
         ),
         'True Peak': _gate_cell(
             _read_metric(file, '~health_true_peak_dbtp'), True,
-            thresholds.true_peak_dbtp, _TRUE_PEAK_STEPS, lambda v, t: v >= t, "dBTP", "Not yet measured.",
+            thresholds.true_peak_dbtp, _TRUE_PEAK_STEPS, lambda v, t: v >= t, "dB", "Not yet measured.",
         ),
         'Spectral Cutoff': _gate_cell(
             _read_metric(file, '~health_spectral_cutoff_db'), has_signal,
@@ -1171,7 +1170,7 @@ def _rank_cells(group: list[File], rank_weights: dict[str, int]) -> dict[File, d
             if weight <= 0:
                 result[f][label] = ('na', "Weight is 0 — this axis is not currently used to break ties.")
             elif v is None:
-                result[f][label] = ('na', "Not measured (skipped this scan, or not yet scanned).")
+                result[f][label] = ('na', "Not measured yet, or doesn't apply to this file.")
             elif len(measured) < 2 or best == worst:
                 result[f][label] = ('pass', f"{v:.1f} — nothing else in the group to compare against.")
             elif v == best:
@@ -1202,7 +1201,7 @@ def _dr14_band_cell(file: File, thresholds: analysis.Thresholds, rank_weight: in
     """
     dr14 = _read_metric(file, '~health_dr14')
     if dr14 is None:
-        return 'na', "Skipped this scan (file already gated \"Bad\" by another check), or not yet scanned."
+        return 'na', "Not yet scanned."
     poor = analysis.DR14_POOR_THRESHOLD - thresholds.dr14_shift
     ok = analysis.DR14_OK_THRESHOLD - thresholds.dr14_shift
     good = analysis.DR14_GOOD_THRESHOLD - thresholds.dr14_shift
@@ -1221,7 +1220,7 @@ def _dr14_band_cell(file: File, thresholds: analysis.Thresholds, rank_weight: in
         f" Comparison Priority weight: {rank_weight}/10." if rank_weight
         else " Weight is 0 — not currently used to break ties."
     )
-    return state, f"DR{int(dr14)} — {band} on the TT DR Offline Meter scale.{weight_note}"
+    return state, f"Dynamic range: {band} (technical rating DR{int(dr14)}).{weight_note}"
 
 
 def _format_cell(file: File) -> tuple[str, str]:
@@ -1325,10 +1324,10 @@ class DetailsPanel(QtWidgets.QDialog):
 
         scan_row = QtWidgets.QHBoxLayout()
         self.scan_file_health_button = QtWidgets.QPushButton("Scan File Health", self)
-        self.scan_file_health_button.setToolTip("Scan every file below for File Health (structural).")
+        self.scan_file_health_button.setToolTip("Scan every file below for File Health — checks the file itself for damage or corruption.")
         self.scan_file_health_button.clicked.connect(self._scan_file_health)
         self.scan_track_health_button = QtWidgets.QPushButton("Scan Track Health", self)
-        self.scan_track_health_button.setToolTip("Scan every file below for Track Health (perceptual).")
+        self.scan_track_health_button.setToolTip("Scan every file below for Track Health — checks how the audio actually sounds.")
         self.scan_track_health_button.clicked.connect(self._scan_track_health)
         scan_row.addWidget(self.scan_file_health_button)
         scan_row.addWidget(self.scan_track_health_button)
@@ -1362,8 +1361,8 @@ class DetailsPanel(QtWidgets.QDialog):
         self.show_button.clicked.connect(self._show_in_list)
         self.spectrogram_button = QtWidgets.QPushButton("Spectrogram…", self)
         self.spectrogram_button.setToolTip(
-            "Render a log-frequency spectrogram for the selected file — see a cutoff "
-            "wall, elevated noise floor, or asymmetric stereo content directly, rather "
+            "Show a visual picture of the sound — an easy way to spot problems like a "
+            "missing top end, background noise, or an unbalanced left/right mix, rather "
             "than trusting a single number."
         )
         self.spectrogram_button.clicked.connect(self._show_spectrogram)
@@ -1925,7 +1924,7 @@ class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         if tier is not None:
             header = f"<b>{self._label}: {tier}</b>"
         elif info.get('file_tier') == analysis.FILE_TIER_BROKEN:
-            header = f"<b>{self._label}: N/A</b> — file won't decode"
+            header = f"<b>{self._label}: N/A</b> — file can't be played"
         else:
             header = f"<b>{self._label}: not yet scanned</b>"
         parts = [header]
