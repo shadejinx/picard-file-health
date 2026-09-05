@@ -103,29 +103,42 @@ BANDWIDTH_PROBE_FREQUENCIES_HZ = (
 # this project's own single synthetic sine/lowpass fixture.
 BANDWIDTH_PEAK_RELATIVE_DB = 65.0
 
-# File-integrity signature: astats already reports Max_difference (the
-# single largest sample-to-sample jump anywhere in the track) and
-# Mean_difference (the typical jump) in the same main branch already
-# parsed above — no new ffmpeg pass. An isolated corruption artifact
-# (a bit-flipped sample, a dropped/zeroed buffer) produces a
-# sample-to-sample jump far outside what the track's own bandwidth and
-# level would otherwise produce, spiking Max_difference while barely
-# moving Mean_difference (it's one or a few samples diluted across the
-# whole track). Empirically validated on synthetic fixtures against
-# real content, not guessed:
-#   clean sine tone                              ratio ~1.6
-#   real quiet music (health-demo-files/song-a)   ratio ~7.6  <- highest seen in real content
-#   synthetic 50-sample zeroed dropout            ratio ~7.1
-#   synthetic single-sample full-scale glitch     ratio ~74.8
-# The honest finding: a moderate threshold (e.g. ~10x) would false-
-# positive on legitimate quiet real music, which already reaches ~7.6x
-# on its own. This is deliberately conservative — it catches only
-# severe, unambiguous corruption (comfortably below the confirmed-glitch
-# case, comfortably above every real-content case measured) and stays
-# informational rather than a gate, the same tier of certainty as hum
-# detection: a real signal, not a proof, for subtler corruption this
-# can't reliably separate from legitimate transient content.
-CORRUPTION_DIFFERENCE_RATIO_THRESHOLD = 20.0
+# File-integrity signature: ffmpeg's own MP3 decoder (mpegaudiodec) logs a
+# "bits_left" diagnostic when a frame's Huffman/granule decode leaves an
+# invalid (non-zero, often negative) number of bits after decoding a
+# block — a genuine internal inconsistency in the bit-reservoir pointer
+# (`main_data_begin`), not a guess. Requires `-err_detect compliant` on
+# the decoder to surface (off by default).
+#
+# This replaces an earlier Max_difference/Mean_difference ratio
+# heuristic that turned out to be fundamentally unsound: validated
+# against a 500-file random real-library sample, it false-positived on
+# 79% of ordinary music (real quiet-to-loud dynamic swings — a Tom
+# Waits intro, a Miles Davis soundtrack cue — produce the same ratio
+# signature as real corruption; there is no threshold that separates
+# them, since the technique's own "confirmed corruption" calibration
+# case sat at the 97th percentile of ordinary real content).
+#
+# `bits_left` was reached by direct experimentation against real
+# fixtures, not guessed: engineered corruption of the MP3 bit-reservoir
+# pointer (`main_data_begin`) was confirmed audible by ear and visible
+# as a spectral dropout, and ffmpeg's own decoder logs exactly this
+# condition (see mpegaudiodec_template.c: "some encoders generate an
+# incorrect size for this part" is the softer, expected case logged as
+# "overread" — tested separately and found present on ~5% of real
+# files with thousands of occurrences and no audible/visible defect,
+# unusable as a signal on its own). `bits_left` specifically, gated on
+# `-err_detect compliant`, was validated against 600 real files spanning
+# five different real libraries: 99.2% showed zero occurrences,
+# including a file independently confirmed clean by ear despite 2142
+# "overread" warnings — while every engineered corruption fixture
+# (both a severe frame-desync case and a confirmed-audible one)
+# produced at least one. Still informational only, never a gate: a
+# nonzero count is a real decoder-level signal, not proof audible to a
+# listener in every case (the mildest engineered fixture, a single
+# faint click, didn't trigger it either — this catches moderate-to-
+# severe cases, not every possible glitch).
+CORRUPTION_BITS_LEFT_PATTERN = re.compile(r'bits_left=')
 
 # Minimum astats "Flat factor" to count as real clipping, not incidental
 # same-value runs in loud content. Empirically calibrated: a clean quiet
@@ -546,6 +559,12 @@ def _run_merged_analysis(
     below Nyquist keeps the topmost probe out of a resampler's own
     transition band.
 
+    `-err_detect compliant` is set globally on the decoder — it costs
+    nothing extra (same one decode) and makes ffmpeg's MP3 decoder log a
+    "bits_left" diagnostic on frames with a genuinely invalid bit-
+    reservoir pointer, which `_detect_corruption_signature` below reads
+    straight out of this call's stderr (see CORRUPTION_* comment for why).
+
     Returns (stdout, stderr, returncode) for the whole invocation — a
     non-zero returncode means ffmpeg couldn't decode the file at all
     (every branch depends on the same decode succeeding), same meaning
@@ -582,7 +601,10 @@ def _run_merged_analysis(
         graph.append(f'[{split_labels[i]}]{chain}[{out_label}]')
         out_labels.append(out_label)
 
-    args = [ffmpeg, '-nostdin', '-hide_banner', '-i', filename, '-filter_complex', ';'.join(graph)]
+    args = [
+        ffmpeg, '-nostdin', '-hide_banner', '-err_detect', 'compliant',
+        '-i', filename, '-filter_complex', ';'.join(graph),
+    ]
     for out_label in out_labels:
         args += ['-map', f'[{out_label}]', '-f', 'null', '-']
     proc = _run_subprocess(args)
@@ -605,30 +627,27 @@ def _parse_astats(stderr: str) -> tuple[float, float | None]:
     return flat_factor, peak_db
 
 
-def _detect_corruption_signature(main_stderr: str) -> str | None:
-    """Informational only — never gates or affects the tier (see
-    CORRUPTION_DIFFERENCE_RATIO_THRESHOLD for why: it's deliberately
-    conservative, catching only severe, unambiguous jumps, not proof of
-    corruption the way clipping/cutoff/true-peak/fake-hi-res are).
-    Reuses the same main astats branch _parse_astats already parsed —
-    Max_difference and Mean_difference are both already computed by the
-    one merged decode, no new ffmpeg pass.
+def _detect_corruption_signature(merged_stderr: str) -> str | None:
+    """Informational only — never gates or affects the tier, the same
+    tier of certainty as hum detection: a real decoder-level signal, not
+    proof audible to a listener in every case (see the module-level
+    comment above CORRUPTION_BITS_LEFT_PATTERN for how this was
+    validated and why the ratio-based approach it replaces was dropped).
+
+    Counts ffmpeg's own "bits_left" diagnostic in the merged decode's
+    stderr — not scoped to any one named branch, since this is a
+    decoder-level message, not something any particular filter emits.
+    Requires `-err_detect compliant` on that decode (set in
+    _run_merged_analysis) to be present at all.
     """
-    max_diff = None
-    mean_diff = None
-    for m in re.finditer(r'Max difference:\s*([\d.]+)', main_stderr):
-        max_diff = float(m.group(1))
-    for m in re.finditer(r'Mean difference:\s*([\d.]+)', main_stderr):
-        mean_diff = float(m.group(1))
-    if max_diff is None or not mean_diff:
-        return None
-    ratio = max_diff / mean_diff
-    if ratio < CORRUPTION_DIFFERENCE_RATIO_THRESHOLD:
+    count = len(CORRUPTION_BITS_LEFT_PATTERN.findall(merged_stderr))
+    if count == 0:
         return None
     return (
-        f"Possible data corruption — one or more sample-to-sample jumps "
-        f"{ratio:.0f}x larger than the track's typical jump size, consistent "
-        "with a bit error or dropped audio buffer rather than real content"
+        f"Possible data corruption — {count} decoded audio block"
+        f"{'s' if count != 1 else ''} had an internally inconsistent bit-reservoir "
+        "pointer (ffmpeg's own decoder-level sanity check), consistent with a "
+        "scattered bit error rather than a normal encoding quirk"
     )
 
 
@@ -1165,7 +1184,7 @@ def analyze_file(
     # `issues`/tier (see BANDWIDTH_* constants for why this is a
     # continuous, cause-agnostic estimate rather than a defect gate).
     spectral_bandwidth_hz = _measure_bandwidth(merged_stderr, stream_info.sample_rate, peak_db)
-    corruption_note = _detect_corruption_signature(main_stderr)
+    corruption_note = _detect_corruption_signature(merged_stderr)
 
     issues: list[str] = []
     info: list[str] = []
