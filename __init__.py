@@ -1202,9 +1202,11 @@ class SpectrogramDialog(QtWidgets.QDialog):
 class CompareResultsPanel(QtWidgets.QDialog):
     """Non-modal panel listing every file in each shared-identity group.
 
-    Doesn't declare a winner — presents every file's tier and issues side
-    by side, per group, and only bolds whichever scored higher within its
-    own group as a subtle cue. The user decides; we show the data.
+    Doesn't declare a winner — presents every file's File Tier, Track
+    Tier, and issues side by side, per group, and only bolds whichever
+    scored higher within its own group (File Health first, then Track
+    Health — see _tier_rank) as a subtle cue. The user decides; we show
+    the data.
     """
 
     def __init__(
@@ -1609,10 +1611,10 @@ class CompareHealthAction(BaseAction):
     disagrees with what the main window already shows grouped together.
 
     Doesn't declare a hard winner in the results — only bolds whichever
-    file scored higher within its group (by tier, then a user-weighted
-    rank-sum across bandwidth/noise-floor/dynamic-range/stereo-coherence
-    for tier-tied files — see _composite_winner), as a subtle cue,
-    leaving the actual decision to the user. Matches the design decided
+    file scored higher within its group (File Health rank first, then
+    Track Health rank, then a user-weighted rank-sum across bandwidth/
+    noise-floor/dynamic-range/stereo-coherence for files tied on both
+    tiers — see _composite_winner), as a subtle cue,
     earlier: a perceptual-distance metric like ViSQOL/Zimtohrli would
     tell you the files differ, but not which one is better; the
     directional gate-field reasons and continuous fidelity axes (real,
