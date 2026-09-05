@@ -1,27 +1,36 @@
-# Handoff — File Health plugin, two-tier rewrite COMPLETE (as of session 4)
+# Handoff — File Health plugin, two-tier rewrite COMPLETE (as of session 5)
 
-**Four sessions total.** Session 1 designed the two-tier redesign (see
+**Five sessions total.** Session 1 designed the two-tier redesign (see
 "The redesign" below); session 2 built the two new File Health checks;
-session 3 built both scoring engines and the two-tier UI; session 4 (this
-one) took explicit user direction to split File Health and Track Health
-into **fully independent scans, columns, and menus** — not just two
-tiers computed by one combined pass. See "Session 4 — independent
-scans" below for exactly what changed; treat everything in "Session 3 —
-rewrite complete" below as superseded wherever it describes a single
-combined `analyze_file()`/`AnalysisResult` or one dual-icon column —
-that architecture no longer exists at HEAD.
+session 3 built both scoring engines and the two-tier UI; session 4
+split File Health and Track Health into fully independent scans,
+columns, and menus; session 5 (this one) did a UI/UX polish pass —
+fixed two real bugs (sliders not moving the score, File Health data
+lost on file-to-track matching), renamed the tier vocabulary, removed
+the now-nonsensical Comparison Priority section, and improved tooltip
+accuracy/explanatory depth. See "Session 5 — UI/UX polish" below for
+exactly what changed; treat "Session 4" and "Session 3" below as
+historical except where they still describe the current architecture
+(the independent-scans split itself is unchanged).
 
 **Repo**: `~/Documents/code_repo/picard-file-health`, own git repo.
-**HEAD**: `6fc1598` "Split into fully independent File Health / Track
-Health scans, columns, and menus" — working tree clean, nothing
-uncommitted. Installed and confirmed loading cleanly in a real running
-Picard instance at this exact commit (see verification section).
+**HEAD**: `5ca8cd1` "UI/UX polish: fix real scoring/persistence bugs,
+rename tiers, remove obsolete comparison feature" — working tree
+clean, nothing uncommitted. Installed and confirmed loading cleanly in
+a real running Picard instance at this exact commit (see verification
+section).
+**Tier vocabulary as of this commit**: File Health =
+Unplayable/Bad/OK/Good/Excellent (`FILE_TIERS`); Track Health =
+Bad/OK/Good/Excellent (`TRACK_TIERS`) — renamed from the old
+Broken/Bad/Good/Great/Excellent scale (see "Session 5" below). DR14's
+own internal Poor/Ok/Good/Great/Excellent dynamic-range rating band is
+a separate, deliberately-unrenamed vocabulary — it describes an
+absolute DR measurement, not the file/track tier.
 **`analysis.py` has no `analyze_file()`/`AnalysisResult` anymore** —
 two independent entry points, `analyze_file_health()` →
 `FileHealthResult` and `analyze_track_health()` → `TrackHealthResult`,
 each with its own minimal-vs-heavier decode and its own terminal
-"can't measure" result type. Read "Session 4 — independent scans"
-first.
+"can't measure" result type.
 
 ## What this is
 
@@ -49,6 +58,159 @@ copy of a matched recording is better, or just inspecting one file.
   library tonight (see "Real test corpus" below), plus `BADNESS_MANIFEST.json`
   describing why each one was flagged. Use these for regression testing new
   heuristics — they're real, not synthetic.
+
+## Session 5 — UI/UX polish (bugs, tier renaming, tooltip accuracy)
+
+User's direction this session: "let's polish the UI/UX" — a list of 7
+concrete complaints (Options page no longer making sense post-session-4
+split, whether the sensitivity sliders are actually wired, File Health
+data lost when a file moves from the left/unmatched pane into a
+matched track, tier wording, a tooltip contradiction, gate tooltips
+not explaining *why*, and using Picard's own match context — e.g. a
+"Live" release — to inform tooltip wording).
+
+**Real bug #1 — File Health metadata wiped on match/unmatch.**
+Picard's `Track.add_file()`/`remove_file()` both call
+`File.copy_metadata()`, which replaces `file.metadata` wholesale with
+the matched track's (or the file's own `orig_metadata`'s) tags — see
+`picard/file.py`. Only tags in Picard's own core tag registry
+(`is_calculated`/`is_preserved` `TagVar` flags, driven by
+`picard/tags/tagvars.yaml`) survive that replacement automatically;
+our plugin-defined `~health_*` tags aren't registered there at all, so
+a scanned file's health data was silently wiped every time it got
+matched to a track or unmatched back, forcing a full rescan. Fixed
+with a plugin-owned side-cache (`_health_metadata_cache`, module-level
+dict keyed by the file's absolute path — the `File` object itself
+survives a match/unmatch unchanged, only its `.metadata` gets
+replaced) populated right after every scan writes its metadata
+(`_cache_health_metadata`), and re-applied via
+`api.register_file_post_addition_to_track_processor`/
+`register_file_post_removal_from_track_processor` — both hooks Picard
+runs *after* `copy_metadata()` already did the damage (confirmed by
+reading `Track.add_file()`/`remove_file()` directly: `copy_metadata()`
+then `run_file_post_addition_to_track_processors()`, in that order).
+
+**Real bug #2 — sensitivity sliders didn't move the actual score.**
+User asked "are these sliders wired?" — direct test confirmed **half**
+wired: setting every Track Health slider (Clipping, True Peak,
+Spectral Cutoff, Fake Hi-Res) to its most lenient possible value left
+`compute_track_score`'s result completely unchanged, because each
+check's contribution was scored via `_step_score(value, FIXED_STEPS,
+...)` against the hardcoded calibrated STEPS tuple, never against
+`thresholds.clip_flat_factor` etc. The sliders only affected which
+issue *text* got listed (the separate `has_clipping = flat_factor >
+thresholds.clip_flat_factor` gate used for messages), not the tier a
+user actually sees. Only DR14 (via `dr14_shift`) was wired correctly.
+Fixed with `_anchored_steps(steps, default, current)`: translates a
+calibrated STEPS scale by `current - default`, preserving the
+scale's own relative spacing (validated calibration data isn't
+discarded) while making the user's actual chosen threshold the new
+anchor point. Verified directly: an all-lenient `Thresholds` now
+measurably changes both the score and the tier on a real fixture.
+
+**Comparison Priority section removed entirely.** With File/Track
+Health now fully independent absolute scores (session 4), the
+weighted duplicate-tie-break "which copy wins a tie" ranking this
+section drove no longer makes sense as a *comparison* concept —
+confirmed with the user (`shouldn't the comparison heuristics be
+folded into the track and file health categories?`). Removed:
+`_WeightSlider`, the whole Comparison Priority options-page section,
+`rank_weight_*` config options, `_RANK_AXES`/`_composite_winner`/
+`_RANK_LABELS`/`_rank_explanation`/`_RANK_COLUMN_INFO`/
+`_RANK_COLUMNS`/`_rank_cells`, and the Details window's tie-break
+winner-explanation tooltip. The Details window still bolds a lone
+best-tiered file within a matched group as a subtle cue but never
+breaks a tie.
+
+Of the three measurements that lived under Comparison Priority:
+- **Noise Floor** folded into Track Health as a real calibrated
+  absolute check — own sensitivity slider (tag `NSF`, reused from the
+  old ranking column), weight 0.5 (same downweight rationale as Mains
+  Hum: a raised reading can be a genuine defect but can't be told
+  apart with full certainty from legitimate quiet-passage content like
+  room tone). Threshold (`NOISE_FLOOR_THRESHOLD_DB = -35.0`) calibrated
+  against this project's own 19-fixture real-track sample (measured
+  range -66.4dB to -37.5dB) — narrower validation than the True
+  Peak/Clipping gates' 500-750-file sweeps (sandbox access to the
+  user's real library wasn't available this session), documented as
+  such in the constant's own comment; worth widening with a larger
+  sample if real-world use turns up false positives or misses.
+- **Bandwidth** and **Stereo Coherence** convert to plain
+  informational notes in the Details panel's Notes column
+  (`_bandwidth_stereo_notes`) — no slider, no column, no scoring.
+  Both are cause-agnostic continuous measurements (a naturally
+  treble-light acoustic recording or an intentionally wide stereo mix
+  reads the same as a real defect) that Spectral Cutoff and
+  Out-of-Phase already cover with sharper, absolute logic — turning
+  them into gates would just duplicate those checks with more false
+  positives.
+
+**Tier vocabulary renamed**: Broken/Bad/Good/Great/Excellent ->
+Unplayable/Bad/OK/Good/Excellent, throughout both files
+(`FILE_TIERS`/`TRACK_TIERS`, icon-level maps, `analysis.py`'s
+`FILE_TIER_*` constants/`track_tier_from_score`, every
+docstring/comment/message referencing a tier by name). DR14's own
+internal Poor/Ok/Good/Great/Excellent *dynamic-range rating band*
+(`_dr14_band_cell`, a completely different, more specialized vocabulary
+for describing an absolute DR measurement) is deliberately left as-is
+— it isn't "the tier system" the user meant.
+
+**Tooltip said "No issues detected" next to a non-Excellent tier**
+(reported with a screenshot: `File Health: Good` / `No issues
+detected` / Note: `178kbps MP3 — below the ~192kbps...`). A file
+graded below the top tier purely on bitrate has an empty `issues` list
+(bitrate grading was never a "file_issues" message, only an
+informational `info` note) — the tooltip's hardcoded "No issues
+detected" line fired anyway, contradicting the tier and the note right
+below it. Fixed in `_SingleHealthColumnDelegate._format_tooltip`: that
+line now only appears when there are truly no issues *and* no notes.
+
+**Gate-check tooltips now explain *why*, not just threshold
+arithmetic** (reported example: CLP showing only "0.0 — no clipping
+detected"). `_gate_cell` now takes `fail_reason`/`pass_reason` plain-
+language strings specific to each check (e.g. Clipping: "No clipping
+detected — audio stays cleanly under full volume (0.0, comfortably
+clear of the 1.0 threshold)"), threaded through all five call sites in
+`_check_cells` (Clipping, True Peak, Spectral Cutoff, Fake Hi-Res,
+Noise Floor).
+
+**Match-context-aware notes.** Added `_is_live_context(file)` —
+checks Picard's own matched `releasetype` tag (`file.metadata.getall
+('releasetype')`, populated from the release group's MB secondary
+type) for `"live"`, falling back to a `"(Live"`/`"[Live"` substring in
+the title for files not yet matched. Wired into the two checks most
+likely to false-positive on live material: Spectral Cutoff's fail
+tooltip now notes a live PA/broadcast feed can naturally roll off
+highs without any lossy transcoding, and Noise Floor's fail tooltip
+notes audience/room noise as a likely real cause; the Stereo Coherence
+info note also flags a wide/room-mic'd image as expected on live
+recordings. Verified directly against the real "Pearl Jam ... (Live)"
+asset fixture — both caveats fire correctly.
+
+**Verification performed**: full compile check on both files; a
+headless functional smoke test (`QT_QPA_PLATFORM=offscreen`, loading
+the plugin module as a real package the same way prior sessions did)
+covering a real scan round-trip, tooltip/cell generation for every
+gate, the live-context caveats firing on the Pearl Jam fixture, and a
+simulated match-metadata-wipe-then-restore cycle — all passed; a
+direct before/after `Thresholds` comparison proving the anchored-steps
+fix actually changes the score; the full 22-file real-`assets/`
+regression re-run with zero errors and every tier correctly renamed;
+installed into a real running Picard instance via `picard-cli
+--reinstall`, byte-diff confirmed, live log confirms clean `enable()`
+with no traceback at `5ca8cd1` (one unrelated traceback in the log is
+Picard core's own MP4 parser choking on a pre-existing malformed
+`.m4a` fixture from an earlier session — not this plugin).
+
+**Not yet done / possible follow-up**: the Noise Floor threshold's
+19-fixture calibration sample is much smaller than the True
+Peak/Clipping gates' — sandbox restrictions this session prevented
+access to the user's real library (`master`/`archive` directories
+referenced in earlier sessions) the way prior calibration passes did;
+worth re-running against a larger real sample if Noise Floor ever
+looks over/under-sensitive in practice. No other outstanding items
+from this session's request list.
+
 
 ## Session 4 — independent scans, columns, and menus
 
