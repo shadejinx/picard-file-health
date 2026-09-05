@@ -46,6 +46,7 @@ from picard.util import iter_files_from_objects
 from picard.util.thread import run_task
 
 from . import analysis
+from . import help_content
 
 
 # Ordered worst-to-best, matching analysis.py's FILE_TIER_*/track_tier_
@@ -574,6 +575,30 @@ def _maybe_auto_scan(api: PluginApi, file: File) -> None:
 
 
 
+class HelpDialog(QtWidgets.QDialog):
+    """Static reference doc: what each scan does, why each check exists,
+    how to read the Details window, and how to read a rendered
+    spectrogram. Content lives in help_content.py, kept as plain data
+    separate from this widget-wiring class.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("File Health Help")
+        self.resize(760, 640)
+        layout = QtWidgets.QVBoxLayout(self)
+        tabs = QtWidgets.QTabWidget(self)
+        for title, html in help_content.SECTIONS:
+            browser = QtWidgets.QTextBrowser(self)
+            browser.setOpenExternalLinks(True)
+            browser.setHtml(html)
+            tabs.addTab(browser, title)
+        layout.addWidget(tabs)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close, self)
+        buttons.rejected.connect(self.close)
+        layout.addWidget(buttons)
+
+
 class HealthOptionsPage(OptionsPage):
     NAME = "file_health"
     TITLE = "File Health"
@@ -582,6 +607,12 @@ class HealthOptionsPage(OptionsPage):
     def __init__(self) -> None:
         super().__init__()
         layout = QtWidgets.QVBoxLayout(self)
+        help_row = QtWidgets.QHBoxLayout()
+        help_button = QtWidgets.QPushButton("Help \u2014 How File Health Works\u2026", self)
+        help_button.clicked.connect(self._show_help)
+        help_row.addWidget(help_button)
+        help_row.addStretch(1)
+        layout.addLayout(help_row)
         self.auto_scan_checkbox = QtWidgets.QCheckBox("Automatically scan File Health for newly added files", self)
         layout.addWidget(self.auto_scan_checkbox)
         auto_scan_detail = QtWidgets.QLabel(
@@ -679,6 +710,12 @@ class HealthOptionsPage(OptionsPage):
 
         layout.addWidget(sensitivity_group)
         layout.addStretch(1)
+
+    def _show_help(self) -> None:
+        dialog = HelpDialog(self)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
+
 
     def load(self) -> None:
         self.auto_scan_checkbox.setChecked(self.api.plugin_config['auto_scan'])
