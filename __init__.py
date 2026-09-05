@@ -49,22 +49,22 @@ from . import analysis
 
 
 # Ordered worst-to-best, matching analysis.py's FILE_TIER_*/track_tier_
-# from_score constants exactly. File Health has a terminal `Broken`
+# from_score constants exactly. File Health has a terminal `Unplayable`
 # tier Track Health can't reach (a file that won't decode has nothing
 # to measure perceptually — see analysis.analyze_file's docstring).
-FILE_TIERS = ("Broken", "Bad", "Good", "Great", "Excellent")
-TRACK_TIERS = ("Bad", "Good", "Great", "Excellent")
+FILE_TIERS = ("Unplayable", "Bad", "OK", "Good", "Excellent")
+TRACK_TIERS = ("Bad", "OK", "Good", "Excellent")
 
 # picard.ui.match_icons ships 6 bookmark levels (0=worst red, 5=best
 # green). Mapped explicitly rather than evenly spread across all 6 so
-# the visual jump from a real defect (Bad) to a clean file (Good) stays
+# the visual jump from a real defect (Bad) to a clean file (OK) stays
 # the same big red->green jump it was under the old 6-tier scale, with
-# only the top three tiers (Good/Great/Excellent) using the finer
+# only the top three tiers (OK/Good/Excellent) using the finer
 # upper-range distinctions. Track Health omits level 0 entirely — a
 # perceptual "Bad" is still a real defect, but nothing it measures is
-# as unambiguous as File Health's Broken (a file that won't even play).
-FILE_TIER_ICON_LEVEL = {"Broken": 0, "Bad": 1, "Good": 3, "Great": 4, "Excellent": 5}
-TRACK_TIER_ICON_LEVEL = {"Bad": 1, "Good": 3, "Great": 4, "Excellent": 5}
+# as unambiguous as File Health's Unplayable (a file that won't even play).
+FILE_TIER_ICON_LEVEL = {"Unplayable": 0, "Bad": 1, "OK": 3, "Good": 4, "Excellent": 5}
+TRACK_TIER_ICON_LEVEL = {"Bad": 1, "OK": 3, "Good": 4, "Excellent": 5}
 
 
 class _NoWheelSlider(QtWidgets.QSlider):
@@ -179,83 +179,6 @@ class _SensitivitySlider(QtWidgets.QFrame):
         self.slider.setValue(self._default_index)
 
 
-class _WeightSlider(QtWidgets.QFrame):
-    """A plain 0-10 importance slider for one axis of the compare
-    panel's weighted tie-break (_composite_winner in this module).
-
-    `bands` is an ascending list of (min_value, hint) pairs — the
-    slider shows whichever band's threshold the current value has
-    reached or passed, live as it moves. Coarser than
-    _SensitivitySlider's one-hint-per-step (11 distinct positions here
-    don't each carry a meaningfully distinct story the way a gate
-    threshold's calibrated steps do), but still says in plain language
-    what a given weight actually does to the ranking rather than
-    leaving the user to guess what "7/10" means.
-    """
-
-    def __init__(
-        self,
-        title: str,
-        bands: tuple[tuple[int, str], ...],
-        parent: QtWidgets.QWidget | None = None,
-        tag: str | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._bands = bands
-        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(2)
-
-        header = QtWidgets.QHBoxLayout()
-        title_label = QtWidgets.QLabel(title, self)
-        title_label.setWordWrap(False)
-        bold = title_label.font()
-        bold.setBold(True)
-        title_label.setFont(bold)
-        header.addWidget(title_label)
-        if tag:
-            tag_label = QtWidgets.QLabel(f"({tag})", self)
-            tag_label.setStyleSheet("color: palette(mid);")
-            header.addWidget(tag_label)
-        self.value_label = QtWidgets.QLabel(self)
-        header.addStretch(1)
-        header.addWidget(self.value_label)
-        layout.addLayout(header)
-
-        self.slider = _NoWheelSlider(QtCore.Qt.Orientation.Horizontal, self)
-        self.slider.setMinimum(0)
-        self.slider.setMaximum(10)
-        self.slider.setTickPosition(QtWidgets.QSlider.TickPosition.TicksBelow)
-        self.slider.setTickInterval(1)
-        self.slider.setSingleStep(1)
-        self.slider.setPageStep(1)
-        self.slider.valueChanged.connect(self._on_changed)
-        layout.addWidget(self.slider)
-
-        self.hint_label = QtWidgets.QLabel(self)
-        self.hint_label.setWordWrap(True)
-        muted = self.hint_label.font()
-        muted.setPointSize(max(muted.pointSize() - 1, 8))
-        self.hint_label.setFont(muted)
-        self.hint_label.setStyleSheet("color: palette(mid);")
-        layout.addWidget(self.hint_label)
-
-        self.set_value(5)
-
-    def _on_changed(self, value: int) -> None:
-        self.value_label.setText("Ignored" if value == 0 else f"{value}/10")
-        hint = ""
-        for threshold, text in self._bands:
-            if value >= threshold:
-                hint = text
-        self.hint_label.setText(hint)
-
-    def value(self) -> int:
-        return self.slider.value()
-
-    def set_value(self, value: int) -> None:
-        self.slider.setValue(value)
-
 
 # Each gate's sensitivity slider has 10 hand-picked, non-linear steps —
 # grounded in analysis.py's own calibration data (see the cited margins
@@ -319,6 +242,24 @@ _PHASE_STEPS: list[tuple[float, str]] = [
 ]
 _PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
 
+# Calibrated against this project's own 19-fixture real-track sample
+# (see analysis.NOISE_FLOOR_THRESHOLD_DB) rather than a much larger
+# library sweep — narrower validation than the other gates here, worth
+# widening if real-world use turns up false positives or misses.
+_NOISE_FLOOR_STEPS: list[tuple[float, str]] = [
+    (-20.0, "Only catches obviously loud background noise."),
+    (-25.0, "Catches clearly audible hiss or static."),
+    (-30.0, "Catches moderately audible background noise."),
+    (-35.0, "Balanced default — sits just above every clean file in our real-track sample."),
+    (-40.0, "Slightly more sensitive — may flag quiet room tone on live recordings."),
+    (-42.5, "Moderately sensitive — may flag reverb tails as noise."),
+    (-45.0, "Sensitive — may flag ordinary quiet passages on loud modern masters."),
+    (-47.5, "Very sensitive — expect false positives on many real files."),
+    (-50.0, "Extremely sensitive — most real masters will trigger this."),
+    (-55.0, "Nearly any measurable quiet-passage noise will trigger this."),
+]
+_NOISE_FLOOR_DEFAULT_INDEX = 3  # matches analysis.NOISE_FLOOR_THRESHOLD_DB (-35)
+
 
 # Shifts analysis.DR14_POOR_THRESHOLD/OK/GOOD/GREAT together (see
 # analysis.Thresholds.dr14_shift) rather than exposing four independent
@@ -340,28 +281,6 @@ _DR14_SHIFT_STEPS: list[tuple[float, str]] = [
     (-4.0, "Very strict — only tracks with very open dynamics (DR12+) avoid \"Poor\"."),
 ]
 _DR14_SHIFT_DEFAULT_INDEX = 4  # matches analysis.Thresholds.dr14_shift default (0)
-
-
-# Comparison Priority weight-slider hints — banded (not one hint per
-# integer step) since "how important is this" doesn't have 11 distinct
-# stories the way a calibrated gate threshold does, but each band still
-# says in plain language what that weight actually does to the ranking.
-_RANK_BAND_TEMPLATE = (
-    (0, "Ignored — {noun} won't affect which copy wins a tie."),
-    (1, "Slight factor — only tips a tie when everything else is dead even."),
-    (4, "Meaningful factor — {comparative} has a real edge."),
-    (7, "Dominant factor — {comparative} usually wins outright."),
-)
-
-
-def _rank_bands(noun: str, comparative: str) -> tuple[tuple[int, str], ...]:
-    return tuple((threshold, text.format(noun=noun, comparative=comparative)) for threshold, text in _RANK_BAND_TEMPLATE)
-
-
-_BANDWIDTH_WEIGHT_BANDS = _rank_bands("bandwidth", "the file with more real high-frequency content")
-_NOISE_FLOOR_WEIGHT_BANDS = _rank_bands("noise floor", "the quieter (cleaner) file")
-_DR14_WEIGHT_BANDS = _rank_bands("dynamic range", "the less-compressed (more dynamic) file")
-_COHERENCE_WEIGHT_BANDS = _rank_bands("stereo coherence", "the file with a more consistent stereo image")
 
 
 def _section_header(title: str) -> QtWidgets.QLabel:
@@ -398,16 +317,8 @@ def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
         spectral_silence_db=plugin_config['spectral_silence_db'],
         phase_angle_deg=plugin_config['phase_angle_deg'],
         dr14_shift=plugin_config['dr14_shift'],
+        noise_floor_db=plugin_config['noise_floor_db'],
     )
-
-
-def _rank_weights_from_config(plugin_config) -> dict[str, int]:
-    return {
-        'rank_weight_bandwidth': plugin_config['rank_weight_bandwidth'],
-        'rank_weight_noise_floor': plugin_config['rank_weight_noise_floor'],
-        'rank_weight_dr14': plugin_config['rank_weight_dr14'],
-        'rank_weight_coherence': plugin_config['rank_weight_coherence'],
-    }
 
 
 def _scan_file_health_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
@@ -501,6 +412,61 @@ def _decode_bool(raw: str) -> bool | None:
         return False
     return None
 
+# --- Cross-match metadata persistence ---
+#
+# Picard's Track.add_file()/remove_file() call File.copy_metadata(), which
+# replaces file.metadata wholesale with the matched track's (or the file's
+# own orig_metadata's) tags — see picard/file.py's copy_metadata(). Only
+# tags Picard's own core tag registry marks "calculated" or "preserved"
+# survive that replacement automatically; our plugin-defined `~health_*`
+# tags aren't registered there at all, so a scanned file's health data was
+# silently wiped every time it got matched to a track (or unmatched back),
+# forcing a full rescan. Fixed by keeping our own side-cache keyed by the
+# file's absolute path (the File object itself survives a match/unmatch
+# unchanged, only its .metadata gets replaced) and re-applying it via the
+# file-post-addition/removal-to-track hooks, which Picard runs right after
+# copy_metadata() already did the damage.
+_HEALTH_METADATA_KEYS: tuple[str, ...] = (
+    '~health_file_tier', '~health_file_flags', '~health_file_info',
+    '~health_file_content_hash', '~health_file_changed_since_scan',
+    '~health_track_tier', '~health_track_flags', '~health_track_info',
+    '~health_track_score', '~health_track_content_hash', '~health_track_changed_since_scan',
+    '~health_bandwidth_hz', '~health_noise_floor_db', '~health_dr14', '~health_stereo_coherence',
+    '~health_true_peak_dbtp', '~health_clip_flat_factor', '~health_spectral_cutoff_db',
+    '~health_hires_cutoff_db', '~health_is_out_of_phase', '~health_is_mono_duplicated',
+    '~health_peak_db', '~health_codec_name', '~health_profile', '~health_bitrate_kbps',
+    '~health_sample_rate', '~health_channels',
+)
+
+_health_metadata_cache: dict[str, dict[str, str]] = {}
+
+
+def _cache_health_metadata(file: File) -> None:
+    """Snapshots every currently-set health tag for later restoration —
+    call this right after writing scan results onto file.metadata. Merges
+    into any existing entry rather than replacing it, so a File Health-only
+    scan doesn't blank out already-cached Track Health fields or vice versa.
+    """
+    snapshot = _health_metadata_cache.setdefault(file.filename, {})
+    for key in _HEALTH_METADATA_KEYS:
+        value = file.metadata[key]
+        if value:
+            snapshot[key] = value
+
+
+def _restore_health_metadata_on_match(api: PluginApi, track: Track, file: File) -> None:
+    """Runs after Picard matches or unmatches a file against a track —
+    both call File.copy_metadata() first, which wipes our health tags (see
+    the module comment above). Re-applies the cached values, if any.
+    """
+    snapshot = _health_metadata_cache.get(file.filename)
+    if not snapshot:
+        return
+    for key, value in snapshot.items():
+        file.metadata[key] = value
+    file.update()
+
+
 
 
 def _file_health_scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
@@ -537,6 +503,7 @@ def _file_health_scan_finished(file: File, result: dict[str, object] | None, err
             file.metadata['~health_bitrate_kbps'] = _encode_metric(result['bitrate_kbps'])
             file.metadata['~health_sample_rate'] = _encode_metric(result['sample_rate'])
             file.metadata['~health_channels'] = _encode_metric(result['channels'])
+            _cache_health_metadata(file)
     file.clear_pending()
     file.update()
 
@@ -584,6 +551,7 @@ def _track_health_scan_finished(file: File, result: dict[str, object] | None, er
             file.metadata['~health_bitrate_kbps'] = _encode_metric(result['bitrate_kbps'])
             file.metadata['~health_sample_rate'] = _encode_metric(result['sample_rate'])
             file.metadata['~health_channels'] = _encode_metric(result['channels'])
+            _cache_health_metadata(file)
     file.clear_pending()
     file.update()
 
@@ -695,6 +663,12 @@ class HealthOptionsPage(OptionsPage):
             "Compression Tolerance", _DR14_SHIFT_STEPS, _DR14_SHIFT_DEFAULT_INDEX, fmt="{:+.0f} DR", parent=self, tag="DYN",
         )
         sensitivity_layout.addWidget(self.dr14_shift_slider)
+        sensitivity_layout.addSpacing(8)
+
+        self.noise_floor_slider = _SensitivitySlider(
+            "Noise Floor", _NOISE_FLOOR_STEPS, _NOISE_FLOOR_DEFAULT_INDEX, fmt="{:.1f} dB", parent=self, tag="NSF",
+        )
+        sensitivity_layout.addWidget(self.noise_floor_slider)
 
         sensitivity_reset_row = QtWidgets.QHBoxLayout()
         sensitivity_reset_button = QtWidgets.QPushButton("Reset to Calibrated Defaults", self)
@@ -704,42 +678,6 @@ class HealthOptionsPage(OptionsPage):
         sensitivity_layout.addLayout(sensitivity_reset_row)
 
         layout.addWidget(sensitivity_group)
-
-        layout.addWidget(_section_header("Comparison Priority"))
-        priority_group, priority_layout = _section_frame()
-        priority_intro = QtWidgets.QLabel(
-            "When two files land in the same tier, the Details window uses these settings "
-            "to help pick a favorite — each one only compares files by rank (1st, 2nd, "
-            "...), never by mixing raw numbers that use different units. Set any one to 0 "
-            "to ignore it completely.",
-            self,
-        )
-        priority_intro.setWordWrap(True)
-        priority_layout.addWidget(priority_intro)
-
-        self.rank_bandwidth_slider = _WeightSlider("Bandwidth", _BANDWIDTH_WEIGHT_BANDS, parent=self, tag="BND")
-        priority_layout.addWidget(self.rank_bandwidth_slider)
-        priority_layout.addSpacing(8)
-
-        self.rank_noise_floor_slider = _WeightSlider("Noise Floor", _NOISE_FLOOR_WEIGHT_BANDS, parent=self, tag="NSF")
-        priority_layout.addWidget(self.rank_noise_floor_slider)
-        priority_layout.addSpacing(8)
-
-        self.rank_dr14_slider = _WeightSlider("Dynamic Range", _DR14_WEIGHT_BANDS, parent=self, tag="DYN")
-        priority_layout.addWidget(self.rank_dr14_slider)
-        priority_layout.addSpacing(8)
-
-        self.rank_coherence_slider = _WeightSlider("Stereo Coherence", _COHERENCE_WEIGHT_BANDS, parent=self, tag="COH")
-        priority_layout.addWidget(self.rank_coherence_slider)
-
-        priority_reset_row = QtWidgets.QHBoxLayout()
-        priority_reset_button = QtWidgets.QPushButton("Reset to Equal Weights", self)
-        priority_reset_button.clicked.connect(self._reset_priority_defaults)
-        priority_reset_row.addStretch(1)
-        priority_reset_row.addWidget(priority_reset_button)
-        priority_layout.addLayout(priority_reset_row)
-
-        layout.addWidget(priority_group)
         layout.addStretch(1)
 
     def load(self) -> None:
@@ -751,10 +689,7 @@ class HealthOptionsPage(OptionsPage):
         self.spectral_silence_slider.set_value(self.api.plugin_config['spectral_silence_db'])
         self.phase_angle_slider.set_value(self.api.plugin_config['phase_angle_deg'])
         self.dr14_shift_slider.set_value(self.api.plugin_config['dr14_shift'])
-        self.rank_bandwidth_slider.set_value(self.api.plugin_config['rank_weight_bandwidth'])
-        self.rank_noise_floor_slider.set_value(self.api.plugin_config['rank_weight_noise_floor'])
-        self.rank_dr14_slider.set_value(self.api.plugin_config['rank_weight_dr14'])
-        self.rank_coherence_slider.set_value(self.api.plugin_config['rank_weight_coherence'])
+        self.noise_floor_slider.set_value(self.api.plugin_config['noise_floor_db'])
 
     def save(self) -> None:
         self.api.plugin_config['auto_scan'] = self.auto_scan_checkbox.isChecked()
@@ -764,10 +699,7 @@ class HealthOptionsPage(OptionsPage):
         self.api.plugin_config['spectral_silence_db'] = self.spectral_silence_slider.value()
         self.api.plugin_config['phase_angle_deg'] = self.phase_angle_slider.value()
         self.api.plugin_config['dr14_shift'] = self.dr14_shift_slider.value()
-        self.api.plugin_config['rank_weight_bandwidth'] = self.rank_bandwidth_slider.value()
-        self.api.plugin_config['rank_weight_noise_floor'] = self.rank_noise_floor_slider.value()
-        self.api.plugin_config['rank_weight_dr14'] = self.rank_dr14_slider.value()
-        self.api.plugin_config['rank_weight_coherence'] = self.rank_coherence_slider.value()
+        self.api.plugin_config['noise_floor_db'] = self.noise_floor_slider.value()
 
     def _reset_sensitivity_defaults(self) -> None:
         self.clip_slider.reset_to_default()
@@ -775,12 +707,7 @@ class HealthOptionsPage(OptionsPage):
         self.spectral_silence_slider.reset_to_default()
         self.phase_angle_slider.reset_to_default()
         self.dr14_shift_slider.reset_to_default()
-
-    def _reset_priority_defaults(self) -> None:
-        self.rank_bandwidth_slider.set_value(5)
-        self.rank_noise_floor_slider.set_value(5)
-        self.rank_dr14_slider.set_value(5)
-        self.rank_coherence_slider.set_value(5)
+        self.noise_floor_slider.reset_to_default()
 
     def _browse_ffmpeg(self) -> None:
         path, _filter = QtWidgets.QFileDialog.getOpenFileName(self, "Locate ffmpeg")
@@ -929,92 +856,6 @@ def _read_metric(file: File, key: str) -> float | None:
     return _decode_metric(file.metadata[key] or '')
 
 
-# (metadata key, plugin_config weight key, higher-value-is-better)
-_RANK_AXES: tuple[tuple[str, str, bool], ...] = (
-    ('~health_bandwidth_hz', 'rank_weight_bandwidth', True),
-    ('~health_noise_floor_db', 'rank_weight_noise_floor', False),
-    ('~health_dr14', 'rank_weight_dr14', True),
-    ('~health_stereo_coherence', 'rank_weight_coherence', True),
-)
-
-
-def _composite_winner(files: list[File], rank_weights: dict[str, int]) -> File | None:
-    """Weighted rank-sum (Borda count) tie-break among tier-tied files.
-
-    Deliberately NOT a single weighted score combining raw Hz/dB/DR-point/
-    correlation values — that would need arbitrary unit-conversion
-    factors this project has no defensible basis for (bandwidth is in
-    Hz, noise floor in dB, dynamic range in DR-points, coherence a
-    [-1,1] ratio; there's no principled way to say "1kHz of bandwidth is
-    worth how many dB of noise floor"). Each axis instead only
-    contributes each file's *relative rank position within this group*
-    — 1st place, 2nd place, etc. — scaled by the user's own importance
-    weight for that axis, so no unit conversion is ever needed.
-
-    A file missing a measurement on some axis gets the worst possible
-    rank on that axis (one past the last measured file), so missing
-    data never accidentally looks best. An axis is skipped entirely
-    when its weight is 0 or fewer than two files in the group have a
-    value for it — nothing to legitimately compare.
-
-    Returns None when no axis contributed anything, or when the
-    weighted totals still end in an exact tie — this plugin's standing
-    policy is to not declare a winner without a real signal to back it.
-    """
-    if len(files) < 2:
-        return None
-    scores: dict[File, float] = dict.fromkeys(files, 0.0)
-    any_axis_used = False
-    for metadata_key, weight_key, higher_is_better in _RANK_AXES:
-        weight = rank_weights.get(weight_key, 0)
-        if weight <= 0:
-            continue
-        measured = {f: v for f in files if (v := _read_metric(f, metadata_key)) is not None}
-        if len(measured) < 2:
-            continue
-        any_axis_used = True
-        ordered = sorted(measured, key=lambda f: measured[f], reverse=higher_is_better)
-        for rank_index, f in enumerate(ordered, start=1):
-            scores[f] += rank_index * weight
-        worst_rank = len(ordered) + 1
-        for f in files:
-            if f not in measured:
-                scores[f] += worst_rank * weight
-    if not any_axis_used:
-        return None
-    best_score = min(scores.values())
-    winners = [f for f, s in scores.items() if s == best_score]
-    return winners[0] if len(winners) == 1 else None
-
-
-_RANK_LABELS: dict[str, str] = {
-    'rank_weight_bandwidth': "Bandwidth",
-    'rank_weight_noise_floor': "Noise floor",
-    'rank_weight_dr14': "Dynamic range",
-    'rank_weight_coherence': "Stereo coherence",
-}
-
-
-def _rank_explanation(files: list[File], rank_weights: dict[str, int]) -> str:
-    """Plain-text breakdown of the values the weighted tie-break actually
-    used, attached as the winning row's tooltip — a rank position is
-    never shown without the numbers behind it.
-    """
-    lines: list[str] = []
-    for metadata_key, weight_key, _higher in _RANK_AXES:
-        weight = rank_weights.get(weight_key, 0)
-        if weight <= 0:
-            continue
-        values = [(f.base_filename, _read_metric(f, metadata_key)) for f in files]
-        if sum(1 for _name, v in values if v is not None) < 2:
-            continue
-        label = _RANK_LABELS.get(weight_key, weight_key)
-        parts = ", ".join(f"{name}={v:.1f}" if v is not None else f"{name}=?" for name, v in values)
-        lines.append(f"{label} (weight {weight}): {parts}")
-    if not lines:
-        return ""
-    return "Ranked ahead of tied files by:\n" + "\n".join(lines)
-
 
 # --- Comparison-matrix stoplight logic ---
 
@@ -1035,24 +876,10 @@ _CHECK_TAGS: dict[str, str] = {
     'Spectral Cutoff': 'TRB',
     'Out-of-Phase': 'PHS',
     'Fake Hi-Res': 'HRS',
+    'Noise Floor': 'NSF',
 }
 _CHECK_COLUMNS = list(_CHECK_TAGS)
 
-# rank axis label -> (metadata key, plugin_config weight key, tag,
-# higher-value-is-better) — for the three axes with no absolute
-# pass/fail meaning of their own anywhere in analysis.py (only relative
-# to whichever files are being compared right now). Dynamic Range is
-# deliberately NOT here — see _dr14_band_cell for why it needs
-# different treatment: unlike these three, it has a real absolute band
-# that decides Tier, so relative-in-group coloring would show "pass"
-# for the best-in-group file even when every file in the group is
-# absolutely Poor.
-_RANK_COLUMN_INFO: dict[str, tuple[str, str, str, bool]] = {
-    'Bandwidth': ('~health_bandwidth_hz', 'rank_weight_bandwidth', 'BND', True),
-    'Noise Floor': ('~health_noise_floor_db', 'rank_weight_noise_floor', 'NSF', False),
-    'Stereo Coherence': ('~health_stereo_coherence', 'rank_weight_coherence', 'COH', True),
-}
-_RANK_COLUMNS = list(_RANK_COLUMN_INFO)
 _DR14_TAG = 'DYN'
 
 _LOSSLESS_CODECS = {'flac', 'alac', 'wavpack', 'tta', 'ape'}
@@ -1079,24 +906,46 @@ def _gate_cell(
     fails: Callable[[float, float], bool],
     unit: str,
     na_reason: str,
+    fail_reason: str,
+    pass_reason: str,
 ) -> tuple[str, str]:
-    """One gate check's cell: (state, tooltip). Amber means "would fail if
-    the matching Options-page slider moved one notch stricter" — reuses
-    the slider's own calibrated steps rather than a new invented margin,
-    so the amber band moves live with the slider instead of sitting at a
-    fixed offset unrelated to what the user actually configured.
+    """One gate check's cell: (state, tooltip). `fail_reason`/`pass_reason`
+    are plain-language explanations of what this measurement actually
+    means for the audio (e.g. "Audio is clipped — pushed past full volume
+    and distorted"), not just the raw number versus the threshold — a
+    number alone doesn't tell a general user why it matters. Amber means
+    "would fail if the matching Options-page slider moved one notch
+    stricter" — reuses the slider's own calibrated steps rather than a
+    new invented margin, so the amber band moves live with the slider
+    instead of sitting at a fixed offset unrelated to what the user
+    actually configured.
     """
     if not applies or value is None:
         return 'na', na_reason
     if fails(value, current):
-        return 'fail', f"{value:.1f}{unit} — already past the current threshold ({current:.1f}{unit})."
+        return 'fail', f"{fail_reason} ({value:.1f}{unit}, past the {current:.1f}{unit} threshold)."
     next_stricter = _next_stricter_step(steps, current)
     if next_stricter is not None and fails(value, next_stricter):
         return 'amber', (
-            f"{value:.1f}{unit} — clear of the current threshold ({current:.1f}{unit}), but would fail "
-            f"one slider notch stricter ({next_stricter:.1f}{unit})."
+            f"{pass_reason} ({value:.1f}{unit}), but only just — one slider notch stricter "
+            f"({next_stricter:.1f}{unit}) would flag this file."
         )
-    return 'pass', f"{value:.1f}{unit} — comfortably clear of the threshold ({current:.1f}{unit})."
+    return 'pass', f"{pass_reason} ({value:.1f}{unit}, comfortably clear of the {current:.1f}{unit} threshold)."
+
+
+def _is_live_context(file: File) -> bool:
+    """True when Picard's own matched-release metadata (or the track's
+    own title) marks this as a live recording — used to add context to
+    checks that can look like a defect on live material for legitimate
+    reasons (PA/broadcast-feed roll-off, audience/room noise, a wider or
+    less consistent stereo image from room mic placement) rather than
+    actual damage or a lossy transcode.
+    """
+    release_types = [t.lower() for t in file.metadata.getall('releasetype')]
+    if 'live' in release_types:
+        return True
+    title = (file.metadata['title'] or '').lower()
+    return '(live' in title or '[live' in title
 
 
 def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple[str, str]]:
@@ -1116,21 +965,46 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
         'Clipping': _gate_cell(
             _read_metric(file, '~health_clip_flat_factor'), True,
             thresholds.clip_flat_factor, _CLIP_STEPS, lambda v, t: v > t, "", "Not yet measured.",
+            "Audio is clipped — pushed past full volume and distorted",
+            "No clipping detected — audio stays cleanly under full volume",
         ),
         'True Peak': _gate_cell(
             _read_metric(file, '~health_true_peak_dbtp'), True,
             thresholds.true_peak_dbtp, _TRUE_PEAK_STEPS, lambda v, t: v >= t, "dB", "Not yet measured.",
+            "Peaks between samples overshoot full volume — can distort on some playback equipment "
+            "even though no single sample clips",
+            "Peaks stay safely under full volume, including the overshoot that happens between samples",
         ),
         'Spectral Cutoff': _gate_cell(
             _read_metric(file, '~health_spectral_cutoff_db'), has_signal,
             thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
             "Near-silent file — not enough signal to measure high-frequency content.",
+            "No real sound above the cutoff frequency — likely converted from a lossy file (like an MP3) "
+            "at some point" + (
+                ", though a live recording's PA system or broadcast feed can also naturally roll off "
+                "high frequencies without any lossy transcoding involved" if _is_live_context(file) else ""
+            ),
+            "Real high-frequency content extends above the cutoff, consistent with a genuine full-bandwidth source",
         ),
         'Fake Hi-Res': _gate_cell(
             _read_metric(file, '~health_hires_cutoff_db'), is_hires and has_signal,
             thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
             "Not a hi-res-rate file — check doesn't apply." if not is_hires else
             "Near-silent file — not enough signal to measure.",
+            "Labeled as hi-res audio but has no real content above the check frequency — likely stretched "
+            "up from an ordinary file rather than genuine hi-res",
+            "Real content exists above the check frequency, consistent with genuine hi-res audio",
+        ),
+        'Noise Floor': _gate_cell(
+            _read_metric(file, '~health_noise_floor_db'), True,
+            thresholds.noise_floor_db, _NOISE_FLOOR_STEPS, lambda v, t: v >= t, "dB",
+            "Not yet measured, or the file has no quiet passage to measure.",
+            "Background noise (hiss/static) is audible in the quietest passage — likely left over from an "
+            "analog transfer or a noisy recording environment" + (
+                ", though audience and room noise on a live recording is often the real cause rather than "
+                "a bad transfer" if _is_live_context(file) else ""
+            ),
+            "Quiet passages are close to silent, with no audible background noise",
         ),
     }
     is_out_of_phase = _decode_bool(file.metadata['~health_is_out_of_phase'])
@@ -1147,57 +1021,13 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
     return cells
 
 
-def _rank_cells(group: list[File], rank_weights: dict[str, int]) -> dict[File, dict[str, tuple[str, str]]]:
-    """Every ranking-axis column's (state, tooltip) for every file in one
-    compare group — relative *within this group* (best measured value
-    green, worst red, the rest amber), since these axes have no absolute
-    pass/fail threshold of their own, only a tie-break weight. A weight
-    of 0 dims the whole column to "na" regardless of the measured values
-    — it isn't currently used to break ties.
-    """
-    result: dict[File, dict[str, tuple[str, str]]] = {f: {} for f in group}
-    for label, (metadata_key, weight_key, _tag, higher_is_better) in _RANK_COLUMN_INFO.items():
-        weight = rank_weights.get(weight_key, 0)
-        values = {f: _read_metric(f, metadata_key) for f in group}
-        measured = {f: v for f, v in values.items() if v is not None}
-        if measured:
-            best = max(measured.values()) if higher_is_better else min(measured.values())
-            worst = min(measured.values()) if higher_is_better else max(measured.values())
-        else:
-            best = worst = None
-        for f in group:
-            v = values[f]
-            if weight <= 0:
-                result[f][label] = ('na', "Weight is 0 — this axis is not currently used to break ties.")
-            elif v is None:
-                result[f][label] = ('na', "Not measured yet, or doesn't apply to this file.")
-            elif len(measured) < 2 or best == worst:
-                result[f][label] = ('pass', f"{v:.1f} — nothing else in the group to compare against.")
-            elif v == best:
-                result[f][label] = ('pass', f"{v:.1f} — best in the group (weight {weight}/10).")
-            elif v == worst:
-                result[f][label] = ('fail', f"{v:.1f} — worst in the group (weight {weight}/10).")
-            else:
-                result[f][label] = ('amber', f"{v:.1f} — middle of the group (weight {weight}/10).")
-    return result
 
 
-def _dr14_band_cell(file: File, thresholds: analysis.Thresholds, rank_weight: int) -> tuple[str, str]:
-    """Dynamic Range's cell, unlike the three purely-relative ranking
-    axes: DR14 has its own absolute Poor/Ok/Good/Great/Excellent band
-    (it's one weighted input into the Track Health composite score —
-    see analysis.compute_track_score/_dr14_score), so it's colored by
-    that band, not relative to whichever other files happen to be in
-    this compare group. Relative coloring would show "best in group"
-    as green even when every file compared is absolutely Poor — a
-    real contradiction with the Track Tier column, not just a
-    cosmetic quibble.
-
-    The Comparison Priority weight still matters for tie-breaking among
-    same-tier files (see _composite_winner), so it's noted in the
-    tooltip, but never dims this column to "na" the way a 0 weight does
-    for the purely-relative axes — DR14 affects Tier regardless of
-    whether its weight is used for tie-breaking.
+def _dr14_band_cell(file: File, thresholds: analysis.Thresholds) -> tuple[str, str]:
+    """Dynamic Range's cell has its own absolute Poor/Ok/Good/Great/
+    Excellent band (it's one weighted input into the Track Health
+    composite score — see analysis.compute_track_score/_dr14_score),
+    colored by that band directly rather than relative to other files.
     """
     dr14 = _read_metric(file, '~health_dr14')
     if dr14 is None:
@@ -1216,11 +1046,7 @@ def _dr14_band_cell(file: File, thresholds: analysis.Thresholds, rank_weight: in
         state, band = 'pass', "Great"
     else:
         state, band = 'pass', "Excellent"
-    weight_note = (
-        f" Comparison Priority weight: {rank_weight}/10." if rank_weight
-        else " Weight is 0 — not currently used to break ties."
-    )
-    return state, f"Dynamic range: {band} (technical rating DR{int(dr14)}).{weight_note}"
+    return state, f"Dynamic range: {band} (technical rating DR{int(dr14)})."
 
 
 def _format_cell(file: File) -> tuple[str, str]:
@@ -1255,6 +1081,29 @@ def _format_cell(file: File) -> tuple[str, str]:
     tooltip_bitrate = "Lossless" if lossless else (f"{int(bitrate)} kbps" if bitrate is not None else "unknown")
     tooltip = f"Codec: {codec_display}\nBitrate: {tooltip_bitrate}\nSample rate: {sr_display}\nChannels: {ch_display}"
     return text, tooltip
+
+
+def _bandwidth_stereo_notes(file: File) -> list[str]:
+    """Plain informational lines for Bandwidth and Stereo Coherence —
+    continuous measurements with no absolute pass/fail meaning of their
+    own (a naturally treble-light acoustic recording or an intentionally
+    wide stereo mix would measure the same as a real defect), so they're
+    shown as reference numbers in Notes rather than colored gate columns.
+    Spectral Cutoff and Out-of-Phase already cover the real defect
+    versions of "no real high end"/"channels don't correlate" with
+    sharper, absolute logic.
+    """
+    notes: list[str] = []
+    bandwidth_hz = _read_metric(file, '~health_bandwidth_hz')
+    if bandwidth_hz is not None:
+        notes.append(f"Bandwidth: real content up to ~{bandwidth_hz / 1000:.1f}kHz")
+    coherence = _read_metric(file, '~health_stereo_coherence')
+    if coherence is not None:
+        note = f"Stereo image: {coherence:.2f} left/right correlation (1.0 = identical, 0.0 = fully independent)"
+        if coherence < 0.5 and _is_live_context(file):
+            note += " — a wider, less-correlated image is common on live recordings from room/audience mic'ing"
+        notes.append(note)
+    return notes
 
 
 _FILE_ROLE = QtCore.Qt.ItemDataRole.UserRole
@@ -1305,7 +1154,6 @@ class DetailsPanel(QtWidgets.QDialog):
         self,
         ffmpeg_path: str | None,
         thresholds: analysis.Thresholds,
-        rank_weights: dict[str, int],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1314,7 +1162,6 @@ class DetailsPanel(QtWidgets.QDialog):
         self.resize(1350, 420)
         self._ffmpeg_path = ffmpeg_path
         self._thresholds = thresholds
-        self._rank_weights = rank_weights
         # (label, files) per group, in display order — kept around so a scan
         # triggered from this panel can redraw in place without the caller
         # re-deriving track groupings or the user closing/reopening it.
@@ -1335,11 +1182,10 @@ class DetailsPanel(QtWidgets.QDialog):
         layout.addLayout(scan_row)
 
         self.tree = QtWidgets.QTreeWidget(self)
-        full_names = ['File', 'File Tier', 'Track Tier', 'Format'] + _CHECK_COLUMNS + ['Dynamic Range'] + _RANK_COLUMNS + ['Notes']
+        full_names = ['File', 'File Tier', 'Track Tier', 'Format'] + _CHECK_COLUMNS + ['Dynamic Range', 'Notes']
         headers = ['File', 'File Tier', 'Track Tier', 'Format']
         headers += [_CHECK_TAGS[c] for c in _CHECK_COLUMNS]
         headers += [_DR14_TAG]
-        headers += [_RANK_COLUMN_INFO[c][2] for c in _RANK_COLUMNS]
         headers += ['Notes']
         self.tree.setHeaderLabels(headers)
         for col, full_name in enumerate(full_names):
@@ -1350,7 +1196,7 @@ class DetailsPanel(QtWidgets.QDialog):
         self.tree.setColumnWidth(3, 220)
         for col in range(4, len(headers) - 1):
             self.tree.setColumnWidth(col, 55)
-        self.tree.setColumnWidth(len(headers) - 1, 200)
+        self.tree.setColumnWidth(len(headers) - 1, 280)
         self.tree.setRootIsDecorated(True)
         self.tree.itemSelectionChanged.connect(self._update_button_states)
         self.tree.itemDoubleClicked.connect(lambda *_: self._show_in_list())
@@ -1410,21 +1256,19 @@ class DetailsPanel(QtWidgets.QDialog):
         header.setFont(0, italic)
         self.tree.addTopLevelItem(header)
 
+        # Only bolds a lone best-tiered file as a subtle cue — never
+        # picks a favorite among files tied on both File Tier and Track
+        # Tier (see HANDOFF.md's "Session 5" for why the old weighted
+        # tie-break was removed: it doesn't make sense once File/Track
+        # Health are fully independent absolute scores, not a ranking).
         ranks = {file: _tier_rank(file) for file in group}
         best_rank = max(ranks.values())
         top_files = [f for f in group if ranks[f] == best_rank]
-        if len(group) < 2 or best_rank == (-1, -1):
-            winner = None
-        elif len(top_files) == 1:
-            winner = top_files[0]
-        else:
-            winner = _composite_winner(top_files, self._rank_weights)
-
-        rank_cells_by_file = _rank_cells(group, self._rank_weights)
+        winner = top_files[0] if (len(group) >= 2 and best_rank != (-1, -1) and len(top_files) == 1) else None
 
         for file in group:
             file_tier = file.metadata['~health_file_tier'] or "Not yet scanned"
-            # A Broken file has no Track Health to show (see
+            # An Unplayable file has no Track Health to show (see
             # analysis.analyze_track_health's docstring) — nothing to
             # measure perceptually, distinct from "not yet scanned".
             if file.metadata['~health_track_tier']:
@@ -1444,20 +1288,15 @@ class DetailsPanel(QtWidgets.QDialog):
                 state, tooltip = check_cells[check_name]
                 self._paint_matrix_cell(item, col, state, tooltip)
                 col += 1
-            dr14_state, dr14_tooltip = _dr14_band_cell(
-                file, self._thresholds, self._rank_weights.get('rank_weight_dr14', 0)
-            )
+            dr14_state, dr14_tooltip = _dr14_band_cell(file, self._thresholds)
             self._paint_matrix_cell(item, col, dr14_state, dr14_tooltip)
             col += 1
-            for label in _RANK_COLUMNS:
-                state, tooltip = rank_cells_by_file[file][label]
-                self._paint_matrix_cell(item, col, state, tooltip)
-                col += 1
 
             info_parts = []
             for info_key in ('~health_file_info', '~health_track_info'):
                 if file.metadata[info_key]:
                     info_parts.extend(file.metadata[info_key].split("; "))
+            info_parts.extend(_bandwidth_stereo_notes(file))
             if file.metadata['~health_file_changed_since_scan']:
                 info_parts.insert(0, "File Health: changed since last scan")
             if file.metadata['~health_track_changed_since_scan']:
@@ -1473,10 +1312,6 @@ class DetailsPanel(QtWidgets.QDialog):
                 item.setFont(0, bold)
                 item.setFont(1, bold)
                 item.setFont(2, bold)
-                if len(top_files) > 1:
-                    explanation = _rank_explanation(top_files, self._rank_weights)
-                    if explanation:
-                        item.setToolTip(1, explanation)
             header.addChild(item)
         header.setExpanded(True)
 
@@ -1712,7 +1547,6 @@ def _open_details_panel(
     parent: QtWidgets.QWidget,
     ffmpeg_path: str | None,
     thresholds: analysis.Thresholds,
-    rank_weights: dict[str, int],
 ) -> DetailsPanel | None:
     """Groups by Track where matched, singleton otherwise (see
     _group_files_for_details), opens the panel if any files were given.
@@ -1720,7 +1554,7 @@ def _open_details_panel(
     groups = _group_files_for_details(files)
     if not groups:
         return None
-    panel = DetailsPanel(ffmpeg_path, thresholds, rank_weights, parent)
+    panel = DetailsPanel(ffmpeg_path, thresholds, parent)
     for label, group in groups:
         panel.add_group(label, group)
     panel.show()
@@ -1736,11 +1570,11 @@ class ShowFileHealthDetailsAction(BaseAction):
     row.
 
     Doesn't declare a hard winner in the results — only bolds whichever
-    file scored higher within its group (File Health rank first, then
-    Track Health rank, then a user-weighted rank-sum across bandwidth/
-    noise-floor/dynamic-range/stereo-coherence for files tied on both
-    tiers — see _composite_winner), as a subtle cue, leaving the actual
-    decision to the user. Matches the design decided earlier: a
+    file scored higher within its group (File Health tier first, then
+    Track Health tier) as a subtle cue when one file is unambiguously
+    ahead; ties are left unbolded rather than broken by a secondary
+    ranking, since File/Track Health are independent absolute scores,
+    not a comparison. Matches the design decided earlier: a
     perceptual-distance metric like ViSQOL/Zimtohrli would tell you the
     files differ, but not which one is better; the directional gate-
     field reasons and continuous fidelity axes (real, from
@@ -1756,8 +1590,7 @@ class ShowFileHealthDetailsAction(BaseAction):
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
-        rank_weights = _rank_weights_from_config(self.api.plugin_config)
-        panel = _open_details_panel(files, window, ffmpeg_path, thresholds, rank_weights)
+        panel = _open_details_panel(files, window, ffmpeg_path, thresholds)
         if panel is None:
             window.set_statusbar_message("No files selected.", echo=None)
             return
@@ -1776,8 +1609,7 @@ class ShowAllFileHealthDetailsAction(BaseAction):
         window = tagger_instance().window
         ffmpeg_path = self.api.plugin_config['ffmpeg_path'] or None
         thresholds = _thresholds_from_config(self.api.plugin_config)
-        rank_weights = _rank_weights_from_config(self.api.plugin_config)
-        panel = _open_details_panel(_all_loaded_files(), window, ffmpeg_path, thresholds, rank_weights)
+        panel = _open_details_panel(_all_loaded_files(), window, ffmpeg_path, thresholds)
         if panel is None:
             window.set_statusbar_message("No files currently loaded in Picard.", echo=None)
             return
@@ -1935,7 +1767,7 @@ class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         if issues:
             items = "".join(f"<li>{issue}</li>" for issue in issues)
             parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
-        elif tier is not None:
+        elif tier is not None and not notes:
             parts.append("<br>No issues detected")
         if notes:
             # Informational only — doesn't affect the tier (e.g. mono
@@ -2052,12 +1884,12 @@ def enable(api: PluginApi) -> None:
     load_match_icons()
     api.register_script_variable(
         '_health_file_tier',
-        documentation="File Health tier from the last scan (Broken/Bad/Good/Great/Excellent).",
+        documentation="File Health tier from the last scan (Unplayable/Bad/OK/Good/Excellent).",
         title="File Health",
     )
     api.register_script_variable(
         '_health_track_tier',
-        documentation="Track Health tier from the last scan (Bad/Good/Great/Excellent); empty if the file is Broken.",
+        documentation="Track Health tier from the last scan (Bad/OK/Good/Excellent); empty if the file is Unplayable.",
         title="Track Health",
     )
     api.register_script_variable(
@@ -2102,11 +1934,10 @@ def enable(api: PluginApi) -> None:
     api.plugin_config.register_option('spectral_silence_db', analysis.SPECTRAL_SILENCE_THRESHOLD_DB)
     api.plugin_config.register_option('phase_angle_deg', analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG)
     api.plugin_config.register_option('dr14_shift', 0.0)
-    api.plugin_config.register_option('rank_weight_bandwidth', 5)
-    api.plugin_config.register_option('rank_weight_noise_floor', 5)
-    api.plugin_config.register_option('rank_weight_dr14', 5)
-    api.plugin_config.register_option('rank_weight_coherence', 5)
+    api.plugin_config.register_option('noise_floor_db', analysis.NOISE_FLOOR_THRESHOLD_DB)
     api.register_file_post_load_processor(_maybe_auto_scan)
+    api.register_file_post_addition_to_track_processor(_restore_health_metadata_on_match)
+    api.register_file_post_removal_from_track_processor(_restore_health_metadata_on_match)
     api.register_options_page(HealthOptionsPage)
 
     # File Health: available everywhere — unmatched files/clusters on
