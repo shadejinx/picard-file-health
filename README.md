@@ -70,6 +70,23 @@ alongside its own test/build dependencies):
 
 This project follows [Linked-Intent Development](docs/high-level-design.md) — design docs, requirements, and their tests live under `docs/` and `tests/`, tracing from intent through to code.
 
+## References
+
+Sources consulted while building and maintaining this plugin, reconstructed after the fact since they weren't tracked as we went.
+
+**Audio analysis** — the empirical basis for every threshold in `analysis.py` is cited in [`docs/high-level-design.md` § References](docs/high-level-design.md#references): ffmpeg's filter documentation, the Pleasurize Music Foundation / MAAT DR Offline Meter (DR14), and HydrogenAudio's transparency listening-test consensus.
+
+**Picard plugin v3 platform:**
+- [Plugin API Reference](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/API.md), [MANIFEST.toml specification](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/MANIFEST.md), [translation system](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/TRANSLATIONS.md), and [security model](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/SECURITY.md) — the basis for this plugin's architecture, `MANIFEST.toml` fields, and the decision to defer a full translation retrofit (tracked in [#1](https://github.com/shadejinx/picard-file-health/issues/1)).
+- [Picard's `CONTRIBUTING.md`](https://github.com/metabrainz/picard/blob/master/CONTRIBUTING.md) — the dev-environment setup this README's test instructions point to.
+
+**Plugin registry submission:**
+- [`picard-plugins-registry` submission guide](https://github.com/metabrainz/picard-plugins-registry/blob/main/PLUGIN_SUBMISSION.md) and [PR template](https://github.com/metabrainz/picard-plugins-registry/blob/main/.github/PULL_REQUEST_TEMPLATE.md) — the basis for the `MANIFEST.toml` completeness pass and this README's structure.
+- [MetaBrainz Contribution Guidelines](https://github.com/metabrainz/guidelines/blob/master/README.md), specifically its AI use policy — the basis for the AI Use Disclosure section below.
+
+**Licensing:**
+- [GNU General Public License v2](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html) — the full text used verbatim in [`LICENSE`](LICENSE).
+
 ## Reporting bugs
 
 <https://github.com/shadejinx/picard-file-health/issues>
