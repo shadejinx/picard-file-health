@@ -10,6 +10,8 @@ from __future__ import annotations
 import inspect
 import os
 
+import pytest
+
 import analysis
 from conftest import FakeFile, FakePluginApi
 
@@ -34,17 +36,51 @@ def test_tooltip_lists_itemized_issues_not_a_free_text_blob(plugin, qapp, patch_
     assert tooltip.count('<li>') == 2
 
 
-def test_enable_retriggers_header_rebuild_at_staggered_delays(plugin, patch_tagger_instance, monkeypatch):
+def test_enable_reconciles_live_views_synchronously_without_a_timer(plugin, patch_tagger_instance, monkeypatch):
     """@spec UI-COL-002"""
     patch_tagger_instance()
-    delays = []
-    monkeypatch.setattr(plugin.QtCore.QTimer, 'singleShot', lambda delay, func: delays.append(delay))
+    monkeypatch.setattr(
+        plugin.QtCore.QTimer,
+        'singleShot',
+        lambda *a, **k: pytest.fail("enable() must reconcile columns synchronously, not via a deferred timer"),
+    )
+    calls = []
+    monkeypatch.setattr(plugin, '_install_delegate_on_live_views', lambda: calls.append('install_delegate'))
     api = FakePluginApi()
     plugin.enable(api)
-    assert sorted(set(delays)) == [0, 250, 1000, 3000]
-    # Both the header-rebuild signal and the live-delegate installer are
-    # scheduled at every one of those delays, not just once overall.
-    assert delays.count(0) == 2
+    # Reconciliation runs exactly once, synchronously, within enable() itself
+    # (no QTimer.singleShot call above would have raised otherwise).
+    assert calls == ['install_delegate']
+
+
+def test_install_delegate_on_live_views_force_shows_both_health_columns(plugin, qapp, patch_tagger_instance):
+    """@spec UI-COL-002"""
+    patch_tagger_instance()
+
+    class FakeHeader:
+        def __init__(self):
+            self.shown = {}
+
+        def show_column(self, index, show):
+            self.shown[index] = show
+
+    class FakeWidget(plugin.QtWidgets.QWidget):
+        def __init__(self, columns):
+            super().__init__()
+            self.columns = columns
+            self._header = FakeHeader()
+
+        def header(self):
+            return self._header
+
+    widget = FakeWidget([plugin._FILE_HEALTH_COLUMN, plugin._TRACK_HEALTH_COLUMN])
+    app = plugin.QtWidgets.QApplication.instance()
+    app.allWidgets = lambda: [widget]
+    try:
+        plugin._install_delegate_on_live_views()
+    finally:
+        del app.allWidgets
+    assert widget._header.shown == {0: True, 1: True}
 
 
 def test_icon_is_left_aligned_not_centered(plugin, qapp, patch_tagger_instance, monkeypatch):

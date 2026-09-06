@@ -1872,16 +1872,28 @@ _HEALTH_COLUMNS = (
 
 
 def _install_delegate_on_live_views() -> None:
-    """Attach the icon-painting delegates to any already-open tree widgets.
+    """Attach the icon-painting delegates to any already-open tree widgets
+    and force both Health columns visible.
 
     ``setItemDelegateForColumn`` is only ever called once, inside each tree
     view's own ``_init_header()``, over whatever columns existed at that
-    exact moment. Adding a column afterward (which is the only timing a
-    plugin can realistically achieve) grows the header and column count via
-    ``header_events.headers_updated``, but never gets a delegate wired up on
-    an already-open window — so the cell falls back to Qt's default (text)
-    renderer, which has nothing to paint for a delegate column. This
-    manually finishes that wiring on whatever tree widgets already exist.
+    exact moment. Since these columns register during plugin ``enable()`` —
+    always after Picard's own tree views already exist, per Picard's own
+    startup ordering (``MainWindow`` construction precedes plugin import and
+    ``enable()`` on every code path, not just usually) — an already-open
+    tree view never gets a delegate wired up for them on its own, so the
+    cell falls back to Qt's default (text) renderer, which has nothing to
+    paint for a delegate column. This manually finishes that wiring on
+    whatever tree widgets already exist.
+
+    It also force-shows both columns via the header's own ``show_column``.
+    Picard's header-rebuild handler (``sync_visible_columns``) only reads
+    back a column's *current* Qt visibility; it never applies ``is_default``
+    — only ``restore_default_columns()`` (tree-view construction, or an
+    explicit "Restore default columns" click) does that. Without this, a
+    column added after construction can end up registered but unchecked,
+    and — since it also lacks a delegate until this same call — rendering
+    nothing even once a user manually checks it.
     """
     app = QtWidgets.QApplication.instance()
     if not app:
@@ -1892,14 +1904,18 @@ def _install_delegate_on_live_views() -> None:
             continue
         columns_list = list(columns)
         set_delegate = getattr(widget, 'setItemDelegateForColumn', None)
-        if not callable(set_delegate):
-            continue
+        header_method = getattr(widget, 'header', None)
+        header = header_method() if callable(header_method) else None
         for column, delegate_class in _HEALTH_COLUMNS:
             try:
                 index = columns_list.index(column)
             except ValueError:
                 continue
-            set_delegate(index, delegate_class(widget))
+            if callable(set_delegate):
+                set_delegate(index, delegate_class(widget))
+            show_column = getattr(header, 'show_column', None)
+            if callable(show_column):
+                show_column(index, True)
 
 
 # @spec UI-COL-002
@@ -1982,28 +1998,20 @@ def enable(api: PluginApi) -> None:
     api.register_track_action(ShowFileHealthDetailsAction)
     api.register_tools_menu_action(ShowAllFileHealthDetailsAction)
 
-    # Force any already-open tree views to rebuild their header (column
-    # count + labels) and recompute every existing row's cell text for the
-    # new column. Without this, the column is registered and even shows as
-    # checked in the header menu, but never actually renders — the tree
-    # widget's Qt column count is fixed at construction and isn't rebuilt
-    # just by mutating the shared columns list or toggling visibility.
+    # Rebuild any already-open tree view's header (column count + labels),
+    # wire the icon-painting delegate onto it, and force both Health columns
+    # visible. Without this, a column is registered but an already-open
+    # tree view's Qt column count doesn't automatically grow to match, and
+    # its visibility doesn't automatically follow `is_default`.
     #
-    # Deferred by at least one event-loop tick (rather than emitted
-    # immediately) since enable() runs synchronously during startup, and
-    # whether MainWindow's tree views already exist (and are already
-    # connected to this signal) at that exact point is not guaranteed —
-    # an immediate emit with zero listeners connected yet is a silent
-    # no-op, not queued for later delivery. A single 0ms retry isn't
-    # enough on a slow/cold startup (slower disk, plugin-registry
-    # network fetches, etc. can delay MainWindow's own construction past
-    # the next tick) — both calls are idempotent (re-running them once
-    # tree views already reflect the new columns is a harmless no-op),
-    # so staggering several retries costs nothing and survives a startup
-    # that's slower than a single deferred tick.
-    for delay_ms in (0, 250, 1000, 3000):
-        QtCore.QTimer.singleShot(delay_ms, header_events.headers_updated.emit)
-        QtCore.QTimer.singleShot(delay_ms, _install_delegate_on_live_views)
+    # Run synchronously, right here — not deferred onto a timer. Picard's
+    # own startup sequence guarantees `MainWindow` (and its tree views) is
+    # fully constructed before the plugin manager ever imports this module
+    # or calls `enable()`, on every code path, so there is no point in the
+    # plugin lifecycle where a tree view could still be un-constructed and
+    # no need to guess at a delay that outlasts a slow startup.
+    header_events.headers_updated.emit()
+    _install_delegate_on_live_views()
 
 
 def disable() -> None:
