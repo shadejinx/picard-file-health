@@ -190,11 +190,11 @@ class _SensitivitySlider(QtWidgets.QFrame):
 _CLIP_STEPS: list[tuple[float, str]] = [
     (25.0, "Only catches severe, obvious clipping — a wall of distortion."),
     (20.0, "Catches heavy clipping most listeners would notice immediately."),
-    (16.0, "Catches clipping close to the mildest real case we've measured."),
+    (16.0, "Catches clipping close to the mildest confirmed case we've measured."),
     (8.0, "Catches moderate clipping — likely audible as harshness."),
     (4.0, "Catches light clipping — may be audible on close listening."),
     (2.0, "Catches subtle clipping most listeners wouldn't notice."),
-    (1.0, "Balanced default — catches real clipping without flagging clean loud audio."),
+    (1.0, "Balanced default — catches genuine clipping without flagging clean loud audio."),
     (0.5, "More sensitive than default — may flag some loud-but-clean audio."),
     (0.1, "Very sensitive — likely to flag loud, dense mixes that aren't clipped."),
     (0.05, "Extremely sensitive — expect false positives on loud modern masters."),
@@ -220,8 +220,8 @@ _SPECTRAL_STEPS: list[tuple[float, str]] = [
     (-85.0, "Requires close to true silence above the cutoff."),
     (-75.0, "Requires strong silence above the cutoff frequency."),
     (-65.0, "Slightly more sensitive than default."),
-    (-60.0, "Balanced default — matches real transcodes and fake hi-res files we've tested."),
-    (-55.0, "Slightly more likely to flag quiet-but-real high frequencies."),
+    (-60.0, "Balanced default — matches confirmed transcodes and fake hi-res files we've tested."),
+    (-55.0, "Slightly more likely to flag quiet, genuine high frequencies."),
     (-50.0, "Moderately sensitive — may flag naturally soft treble."),
     (-45.0, "Sensitive — may flag mellow or bass-heavy mixes."),
     (-35.0, "Very sensitive — expect false positives on quiet acoustic material."),
@@ -251,12 +251,12 @@ _NOISE_FLOOR_STEPS: list[tuple[float, str]] = [
     (-20.0, "Only catches obviously loud background noise."),
     (-25.0, "Catches clearly audible hiss or static."),
     (-30.0, "Catches moderately audible background noise."),
-    (-35.0, "Balanced default — sits just above every clean file in our real-track sample."),
+    (-35.0, "Balanced default — sits just above every clean file we measured."),
     (-40.0, "Slightly more sensitive — may flag quiet room tone on live recordings."),
     (-42.5, "Moderately sensitive — may flag reverb tails as noise."),
     (-45.0, "Sensitive — may flag ordinary quiet passages on loud modern masters."),
-    (-47.5, "Very sensitive — expect false positives on many real files."),
-    (-50.0, "Extremely sensitive — most real masters will trigger this."),
+    (-47.5, "Very sensitive — expect false positives on many ordinary files."),
+    (-50.0, "Extremely sensitive — most ordinary masters will trigger this."),
     (-55.0, "Nearly any measurable quiet-passage noise will trigger this."),
 ]
 _NOISE_FLOOR_DEFAULT_INDEX = 3  # matches analysis.NOISE_FLOOR_THRESHOLD_DB (-35)
@@ -1015,7 +1015,7 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
             thresholds.spectral_silence_db, _SPECTRAL_STEPS, lambda v, t: v < t, "dB",
             "Not a hi-res-rate file." if not is_hires else "Too quiet to measure.",
             "No content above the hi-res frequency, likely upsampled",
-            "Real content confirmed above the check frequency",
+            "Content confirmed above the check frequency",
         ),
         'Noise Floor': _gate_cell(
             _read_metric(file, '~health_noise_floor_db'), True,
@@ -1105,21 +1105,27 @@ def _bandwidth_stereo_notes(file: File) -> list[str]:
     """Plain informational lines for Bandwidth and Stereo Coherence —
     continuous measurements with no absolute pass/fail meaning of their
     own (a naturally treble-light acoustic recording or an intentionally
-    wide stereo mix would measure the same as a real defect), so they're
-    shown as reference numbers in Notes rather than colored gate columns.
-    Spectral Cutoff and Out-of-Phase already cover the real defect
-    versions of "no real high end"/"channels don't correlate" with
+    wide stereo mix would measure the same as a genuine defect), so
+    they're shown as reference numbers in Notes rather than colored gate
+    columns. Spectral Cutoff and Out-of-Phase already cover the actual
+    defect versions of "no high end"/"channels don't correlate" with
     sharper, absolute logic.
     """
     notes: list[str] = []
     bandwidth_hz = _read_metric(file, '~health_bandwidth_hz')
     if bandwidth_hz is not None:
-        notes.append(f"Bandwidth: real content up to ~{bandwidth_hz / 1000:.1f}kHz")
+        notes.append(f"Bandwidth: sound extends up to ~{bandwidth_hz / 1000:.1f}kHz")
     coherence = _read_metric(file, '~health_stereo_coherence')
     if coherence is not None:
-        note = f"Stereo image: {coherence:.2f} left/right correlation (1.0 = identical, 0.0 = fully independent)"
+        if coherence >= 0.7:
+            width = "narrow — left and right channels sound very similar"
+        elif coherence >= 0.3:
+            width = "moderate width"
+        else:
+            width = "wide — left and right channels sound quite different"
+        note = f"Stereo width: {width} ({coherence:.2f} correlation)"
         if coherence < 0.5 and _is_live_context(file):
-            note += " — a wider, less-correlated image is common on live recordings from room/audience mic'ing"
+            note += " — live recordings are often wider due to room/audience mic placement"
         notes.append(note)
     return notes
 
