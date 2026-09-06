@@ -1450,6 +1450,17 @@ class DetailsPanel(QtWidgets.QDialog):
         The rendered PNG lives in a temp file only long enough for
         QPixmap's constructor to read it — that read is synchronous, so
         it's safe to delete right after building the dialog.
+
+        Submitted at a higher priority than the default (0) every scan
+        task uses: this shares Picard's own global thread pool with
+        every other background task in the whole application (file
+        loading, AcoustID fingerprinting, File/Track Health scans,
+        MusicBrainz lookups). QThreadPool's queue is priority-ordered
+        (confirmed against Qt's own source — higher priority runs
+        first), so without this an on-demand, one-file, interactive
+        request could sit queued behind a large already-running batch
+        scan indefinitely, looking exactly like a hang even though
+        nothing is actually broken.
         """
         file = self._current_file()
         if file is None:
@@ -1490,7 +1501,7 @@ class DetailsPanel(QtWidgets.QDialog):
             except OSError:
                 pass
 
-        run_task(render, on_done)
+        run_task(render, on_done, priority=1)
 
     def _remove_from_picard(self) -> None:
         file = self._current_file()
