@@ -1,8 +1,31 @@
 uuid = "e9df52ff-636f-45cb-8020-c8dbb71991fb"
 name = "File Health"
 description = "Detects clipping, transcoding, and loudness-war mastering via ffmpeg"
+long_description = """
+File Health scores every track on two independent axes:
+
+- **File Health** — structural integrity only: does the file decode, is it
+  free of corruption, are its tags and embedded artwork readable. No
+  configuration, because a structural defect either exists or it doesn't.
+- **Track Health** — how the track actually sounds: a weighted composite of
+  clipping, true peak, spectral cutoff (lossy transcode detection), fake
+  hi-res upsampling, out-of-phase/mono-duplicated content, dynamic range
+  (DR14), mains hum, and noise floor. Six sensitivity sliders let you tune
+  how strict each perceptual check is.
+
+Both scores are visible as sortable tree columns with an itemized-issues
+tooltip, plus a Details window that recomputes every check live against
+your current slider settings (not the tier recorded at scan time), and an
+on-demand spectrogram viewer.
+
+Requirements:
+- ffmpeg on PATH, or configured explicitly in the plugin's Options page.
+"""
 api = ["3.0"]
-authors = ["jinx"]
-categories = ["metadata"]
-# homepage = "https://github.com/username/plugin-name"
-# report_bugs_to = "https://your.plugin.bugtracker/issues"
+authors = ["shadejinx"]
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/old-licenses/gpl-2.0.html"
+categories = ["metadata", "ui"]
+homepage = "https://github.com/shadejinx/picard-file-health"
+report_bugs_to = "https://github.com/shadejinx/picard-file-health/issues"
+min_python_version = "3.10"
