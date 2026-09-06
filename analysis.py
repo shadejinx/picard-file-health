@@ -141,7 +141,14 @@ BANDWIDTH_PEAK_RELATIVE_DB = 65.0
 # listener in every case (the mildest engineered fixture, a single
 # faint click, didn't trigger it either — this catches moderate-to-
 # severe cases, not every possible glitch).
-CORRUPTION_BITS_LEFT_PATTERN = re.compile(r'bits_left=')
+# Anchored to ffmpeg's own `[mp3float @ 0xADDR] bits_left=N` decoder
+# log-line format (confirmed empirically) rather than a bare
+# `bits_left=` substring — ffmpeg also prints the file's own
+# container/ID3 tag values to this same stderr, and a tag value
+# crafted to contain the literal text "bits_left=" would otherwise
+# match too. A metadata-dump line is never able to start at column
+# zero with `[` the way a real decoder log line always does.
+CORRUPTION_BITS_LEFT_PATTERN = re.compile(r'^\[mp3float @ [^\]]*\]\s*bits_left=', re.MULTILINE)
 
 # Minimum astats "Flat factor" to count as real clipping, not incidental
 # same-value runs in loud content. Empirically calibrated: a clean quiet
@@ -694,22 +701,45 @@ def _filter_instance_output(stderr: str, tag: str) -> str:
     multi-branch invocation's combined stderr (see _run_merged_analysis).
 
     ffmpeg tags every log line a `filtername@tag` instance prints with a
-    stable `[filtername@tag @ 0xADDR]` prefix (confirmed empirically
-    against a real multi-branch `asplit` filtergraph) — letting each
-    existing single-filter parser (_parse_astats, _parse_mean_volume,
-    ...) run unmodified against just its own branch's output, so two
-    filters of the same type in one invocation (astats appears at most
-    once here; volumedetect can appear twice, for the ordinary
-    spectral-cutoff check and the fake-hi-res check) never contaminate
-    each other's "last match wins" parsing. ebur128 is the one
-    exception: its Summary block prints one tag line, then several
-    untagged detail lines — but only one ebur128 branch ever exists and
-    its "Integrated loudness"/"True peak" labels are already unambiguous
-    in the full combined stderr, so _parse_ebur128 is called against the
-    whole string directly rather than through this slice.
+    stable `[filtername@tag @ 0xADDR]` prefix at the very start of the
+    line (confirmed empirically against a real multi-branch `asplit`
+    filtergraph) — letting each existing single-filter parser
+    (_parse_astats, _parse_mean_volume, ...) run unmodified against
+    just its own branch's output, so two filters of the same type in
+    one invocation (astats appears at most once here; volumedetect can
+    appear twice, for the ordinary spectral-cutoff check and the
+    fake-hi-res check) never contaminate each other's "last match wins"
+    parsing.
+
+    The marker must be matched only within a line's own leading
+    `[...]` tag, not anywhere in the line — ffmpeg also prints the
+    file's own container/ID3 tag values to this same stderr (as an
+    `Input #0 ... Metadata: <key> : <value>` dump, always emitted
+    before any filter/decode output runs), and a tag value crafted to
+    contain the literal text `@cutoff @ ` would otherwise pass a bare
+    substring test and get spliced into the "genuine" output ahead of
+    the real measurement — dangerous specifically because
+    _parse_mean_volume takes the *first* regex match, and the metadata
+    dump always comes first. A metadata-dump line is never able to
+    start at column zero with `[` the way a real filter log line
+    always does (metadata lines are prefixed with the key name or, for
+    embedded newlines, a `                    : ` continuation column),
+    so requiring the marker inside a line's own leading bracket — not
+    merely present somewhere in the line — closes that off.
+
+    ebur128 is the one exception: its Summary block tags only its own
+    header line, then prints several untagged detail lines below it —
+    see _parse_ebur128 for how that one is scoped instead.
     """
     marker = f'@{tag} @ '
-    return '\n'.join(line for line in stderr.splitlines() if marker in line)
+    result = []
+    for line in stderr.splitlines():
+        if not line.startswith('['):
+            continue
+        closing_bracket = line.find(']')
+        if closing_bracket != -1 and marker in line[:closing_bracket]:
+            result.append(line)
+    return '\n'.join(result)
 
 
 def _run_merged_analysis(
@@ -794,11 +824,11 @@ def _run_merged_analysis(
     branches: list[tuple[str | None, str]] = [
         ('main', 'astats@main'),
         ('cutoff', f'highpass=f={SPECTRAL_CUTOFF_FREQUENCY_HZ},volumedetect@cutoff'),
-        (None, 'ebur128=peak=true'),
+        (None, 'ebur128@loud=peak=true'),
     ]
     if include_phase_check:
         branches.append(
-            (None, f'aphasemeter=video=0:phasing=1:angle={phase_angle_deg},ametadata=print:file=-')
+            (None, f'aphasemeter@phase=video=0:phasing=1:angle={phase_angle_deg},ametadata=print:file=-')
         )
     if include_hires_check:
         branches.append(('hires', f'highpass=f={FAKE_HIRES_CHECK_FREQUENCY_HZ},volumedetect@hires'))
@@ -933,9 +963,25 @@ def _parse_ebur128(stderr: str) -> tuple[float | None, float | None]:
     "Integrated loudness"/"True peak" figures are the final,
     complete-file measurement, the same one loudnorm's own `input_i`/
     `input_tp` JSON fields used to carry.
+
+    Only the "@loud @ 0xADDR] Summary:" tag line itself is prefixed —
+    the detail lines below it (where the actual numbers live) aren't,
+    so this can't be scoped via _filter_instance_output the way every
+    other parser in this module is (see that function's docstring).
+    Instead, since ffmpeg always prints a file's own container/ID3 tag
+    dump *before* any decode/filter output, restricting the search to
+    everything at or after the last occurrence of that tag line — which
+    only ffmpeg's own ebur128 filter can emit, never something echoed
+    verbatim from a crafted tag value — keeps a maliciously crafted tag
+    string (e.g. one built to look like a fake Summary block) from
+    being picked up instead of the genuine measurement. No marker found
+    at all (decode/filter never ran) correctly yields no match, not a
+    search of unrelated text.
     """
-    i_match = _EBUR128_INTEGRATED_RE.search(stderr)
-    peak_match = _EBUR128_TRUE_PEAK_RE.search(stderr)
+    marker_pos = stderr.rfind('[ebur128@loud @ ')
+    scoped = stderr[marker_pos:] if marker_pos != -1 else ''
+    i_match = _EBUR128_INTEGRATED_RE.search(scoped)
+    peak_match = _EBUR128_TRUE_PEAK_RE.search(scoped)
     lufs = float(i_match.group(1)) if i_match else None
     true_peak = float(peak_match.group(1)) if peak_match else None
     return lufs, true_peak
@@ -946,7 +992,12 @@ def _parse_phasemeter(stderr: str) -> tuple[bool, bool]:
 
     aphasemeter's own phasing=1 mode does the classification (tolerance/
     angle thresholds are ffmpeg's own, not something calibrated here) —
-    presence of these markers in stderr is the whole signal.
+    presence of these markers in stderr is the whole signal. Every line
+    aphasemeter prints (unlike ebur128's Summary block) carries the
+    `[aphasemeter@phase @ 0xADDR]` tag, so the caller passes in output
+    already scoped via _filter_instance_output(merged_stderr, 'phase')
+    — a crafted tag value containing the literal text "out_phase_start"
+    can't otherwise be told apart from the real, filter-emitted marker.
     """
     return 'mono_start' in stderr, 'out_phase_start' in stderr
 
@@ -1087,7 +1138,7 @@ def _detect_artwork_corruption(ffmpeg: str, ffprobe: str, filename: str) -> bool
     probe = _run_subprocess(
         [
             ffprobe, '-v', 'error', '-select_streams', 'v:0',
-            '-show_entries', 'stream=index', '-of', 'csv=p=0', filename,
+            '-show_entries', 'stream=index', '-of', 'csv=p=0', '-i', filename,
         ]
     )
     if probe.returncode != 0 or not probe.stdout.strip():
@@ -1158,7 +1209,7 @@ def _probe_stream_info(ffprobe: str, filename: str) -> StreamInfo:
         [
             ffprobe, '-v', 'error', '-select_streams', 'a:0',
             '-show_entries', 'stream=codec_name,profile,sample_rate,channels,bit_rate:format=bit_rate',
-            '-of', 'json', filename,
+            '-of', 'json', '-i', filename,
         ]
     )
     try:
@@ -1238,13 +1289,21 @@ def _find_quiet_interval(ffmpeg: str, filename: str) -> tuple[float, float] | No
     none at least HUM_SILENCE_MIN_DURATION_SECONDS long was found — most
     loud modern masters never qualify, correctly: there's no quiet
     passage to check hum against, not "no hum".
+
+    The filter instance is tagged (`@sd`) and its output scoped via
+    _filter_instance_output before either regex runs — ffmpeg also
+    prints the file's own container/ID3 tag values to this same
+    stderr, and an unscoped search could otherwise be redirected to an
+    attacker-chosen offset by a tag value crafted to read like
+    "silence_start: 0.0" / "silence_end: 999.0".
     """
     stderr, _returncode = _run_ffmpeg_filter(
         ffmpeg, filename,
-        f'silencedetect=noise={HUM_SILENCE_THRESHOLD_DB}dB:d={HUM_SILENCE_MIN_DURATION_SECONDS}',
+        f'silencedetect@sd=noise={HUM_SILENCE_THRESHOLD_DB}dB:d={HUM_SILENCE_MIN_DURATION_SECONDS}',
     )
-    starts = [float(m.group(1)) for m in _SILENCE_START_RE.finditer(stderr)]
-    ends = [float(m.group(1)) for m in _SILENCE_END_RE.finditer(stderr)]
+    scoped = _filter_instance_output(stderr, 'sd')
+    starts = [float(m.group(1)) for m in _SILENCE_START_RE.finditer(scoped)]
+    ends = [float(m.group(1)) for m in _SILENCE_END_RE.finditer(scoped)]
     intervals = list(zip(starts, ends))
     if not intervals:
         return None
@@ -1257,10 +1316,14 @@ def _measure_narrowband_rms(
 ) -> float | None:
     stderr, _returncode = _run_ffmpeg_filter(
         ffmpeg, filename,
-        f'bandpass=f={frequency}:width_type=h:w={HUM_BAND_WIDTH_HZ},astats',
+        f'bandpass=f={frequency}:width_type=h:w={HUM_BAND_WIDTH_HZ},astats@rms',
         start=start, duration=duration,
     )
-    m = re.search(r'RMS level dB:\s*(-?[\d.]+|-inf)', stderr)
+    # Scoped via _filter_instance_output before the search — see that
+    # function's docstring for why an unscoped search over stderr
+    # (which also carries the file's own container/ID3 tag dump) is
+    # spoofable by a crafted tag value.
+    m = re.search(r'RMS level dB:\s*(-?[\d.]+|-inf)', _filter_instance_output(stderr, 'rms'))
     if not m:
         return None
     raw = m.group(1)
@@ -1286,8 +1349,8 @@ def _measure_noise_floor(
     if quiet_interval is None:
         return None
     start, duration = quiet_interval
-    stderr, _returncode = _run_ffmpeg_filter(ffmpeg, filename, 'astats', start=start, duration=duration)
-    m = re.search(r'RMS level dB:\s*(-?[\d.]+|-inf)', stderr)
+    stderr, _returncode = _run_ffmpeg_filter(ffmpeg, filename, 'astats@rms', start=start, duration=duration)
+    m = re.search(r'RMS level dB:\s*(-?[\d.]+|-inf)', _filter_instance_output(stderr, 'rms'))
     if not m:
         return None
     raw = m.group(1)
@@ -1935,7 +1998,7 @@ def analyze_track_health(
     is_mono_duplicated: bool | None = None
     is_out_of_phase: bool | None = None
     if channels >= 2:
-        is_mono_duplicated, is_out_of_phase = _parse_phasemeter(merged_stderr)
+        is_mono_duplicated, is_out_of_phase = _parse_phasemeter(_filter_instance_output(merged_stderr, 'phase'))
         stereo_coherence = _measure_stereo_coherence(merged_stdout)
         if is_out_of_phase:
             # A real, audible defect — will cancel out when summed to mono
