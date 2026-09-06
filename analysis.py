@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -595,6 +596,19 @@ def content_hash(filename: str) -> str:
     return hasher.hexdigest()
 
 
+# On Windows, a GUI process (no attached console) spawning a subprocess
+# without this flag gets a new visible console window flashed on screen
+# per call — every ffmpeg/ffprobe invocation in a scan (several per
+# file: merged analysis, probe, artwork decode, ...) would otherwise
+# flash its own console. `CREATE_NO_WINDOW` only exists on Windows;
+# macOS/Linux subprocesses never spawn a console, so no flag is needed
+# there — kept as an empty kwargs dict so the one call site below stays
+# platform-agnostic.
+_SUBPROCESS_KWARGS: dict[str, int] = (
+    {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+)
+
+
 def _run_subprocess(args: list[str]) -> subprocess.CompletedProcess:
     """Every ffmpeg/ffprobe invocation in this module goes through here.
 
@@ -624,6 +638,7 @@ def _run_subprocess(args: list[str]) -> subprocess.CompletedProcess:
             errors='replace',
             timeout=FFMPEG_TIMEOUT_SECONDS,
             check=False,
+            **_SUBPROCESS_KWARGS,
         )
     except (subprocess.TimeoutExpired, OSError):
         return subprocess.CompletedProcess(args, returncode=-1, stdout='', stderr='')
