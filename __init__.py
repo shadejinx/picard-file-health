@@ -1991,14 +1991,21 @@ def enable(api: PluginApi) -> None:
     # widget's Qt column count is fixed at construction and isn't rebuilt
     # just by mutating the shared columns list or toggling visibility.
     #
-    # Deferred by one event-loop tick (singleShot(0, ...)) rather than
-    # emitted immediately: enable() runs synchronously during startup, and
+    # Deferred by at least one event-loop tick (rather than emitted
+    # immediately) since enable() runs synchronously during startup, and
     # whether MainWindow's tree views already exist (and are already
     # connected to this signal) at that exact point is not guaranteed —
     # an immediate emit with zero listeners connected yet is a silent
-    # no-op, not queued for later delivery.
-    QtCore.QTimer.singleShot(0, header_events.headers_updated.emit)
-    QtCore.QTimer.singleShot(0, _install_delegate_on_live_views)
+    # no-op, not queued for later delivery. A single 0ms retry isn't
+    # enough on a slow/cold startup (slower disk, plugin-registry
+    # network fetches, etc. can delay MainWindow's own construction past
+    # the next tick) — both calls are idempotent (re-running them once
+    # tree views already reflect the new columns is a harmless no-op),
+    # so staggering several retries costs nothing and survives a startup
+    # that's slower than a single deferred tick.
+    for delay_ms in (0, 250, 1000, 3000):
+        QtCore.QTimer.singleShot(delay_ms, header_events.headers_updated.emit)
+        QtCore.QTimer.singleShot(delay_ms, _install_delegate_on_live_views)
 
 
 def disable() -> None:
