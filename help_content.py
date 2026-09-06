@@ -208,7 +208,12 @@ DR14's own rating scale).</td></tr>
 bandwidth, stereo coherence, live-recording caveats, stale-scan
 warnings).</td></tr>
 </table>
-
+<p><b>"Changed since last scan"</b> in Notes means the file's bytes are
+different from what they were the last time that scan ran &mdash; including
+after re-saving the file in Picard just to clear an OK-capped tag or
+artwork issue (see the Scans tab). That re-save is itself a real change to
+the file's bytes, so it triggers the same indicator as any other edit;
+rescan to confirm the fix and clear the warning.</p>
 <h2>Stoplight colors</h2>
 <ul>
 <li>&#9989; <b>Green</b>: comfortably clear of the threshold.</li>
@@ -294,6 +299,7 @@ reliably eyeballed from a picture. Use the Details window's own numbers
 and tooltips for anything you need to act on with confidence; use the
 spectrogram to sanity-check what those numbers are telling you.</p>
 """
+# @spec UI-HELP-001, UI-HELP-002
 
 SECTIONS: list[tuple[str, str]] = [
     ("How the Scans Work", _SCANS_HTML),

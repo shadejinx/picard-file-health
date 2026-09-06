@@ -263,18 +263,151 @@ class Thresholds:
 # the most lenient calibrated setting), weighted by how confidently that
 # check's measurement maps to an actually-audible defect, then averaged.
 #
-# Each step table below is the same lenient->lenient-to-strict calibrated
-# scale already used for the Options-page sensitivity sliders (see
-# __init__.py's _SensitivitySlider) — reused here, not reinvented, so the
-# composite score's granularity matches real, previously-validated
-# threshold data rather than an arbitrary new curve. (value, hint) pairs,
-# ordered lenient -> strict; only the values are used for scoring, the
-# hints stay in __init__.py where the slider UI displays them.
+# Each step table below is the same lenient->strict calibrated scale
+# used by the Options-page sensitivity sliders — analysis.py owns the
+# real calibrated value AND hint text at every position (see
+# sensitivity_step()/TH-SLIDER-001); the UI leaf owns only the widget
+# and the user's chosen 1..10 position, never its own separate copy of
+# the calibration data that could drift from this module's. (value,
+# hint) pairs, ordered lenient -> strict.
 CLIP_STEPS: tuple[float, ...] = (25.0, 20.0, 16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.1, 0.05)
 TRUE_PEAK_STEPS: tuple[float, ...] = (3.0, 2.0, 1.5, 1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.0)
 SPECTRAL_STEPS: tuple[float, ...] = (-90.0, -85.0, -75.0, -65.0, -60.0, -55.0, -50.0, -45.0, -35.0, -30.0)
 PHASE_STEPS: tuple[float, ...] = (179.0, 177.0, 174.0, 170.0, 165.0, 158.0, 150.0, 140.0, 120.0, 95.0)
 NOISE_FLOOR_STEPS: tuple[float, ...] = (-20.0, -25.0, -30.0, -35.0, -40.0, -42.5, -45.0, -47.5, -50.0, -55.0)
+
+_CLIP_HINTS: tuple[str, ...] = (
+    "Only catches severe, obvious clipping — a wall of distortion.",
+    "Catches heavy clipping most listeners would notice immediately.",
+    "Catches clipping close to the mildest confirmed case we've measured.",
+    "Catches moderate clipping — likely audible as harshness.",
+    "Catches light clipping — may be audible on close listening.",
+    "Catches subtle clipping most listeners wouldn't notice.",
+    "Balanced default — catches genuine clipping without flagging clean loud audio.",
+    "More sensitive than default — may flag some loud-but-clean audio.",
+    "Very sensitive — likely to flag loud, dense mixes that aren't clipped.",
+    "Extremely sensitive — expect false positives on loud modern masters.",
+)
+CLIP_DEFAULT_POSITION = 7  # matches MIN_FLAT_FACTOR_FOR_CLIPPING (1.0)
+
+_TRUE_PEAK_HINTS: tuple[str, ...] = (
+    "Only catches extreme overs — several dB past full volume.",
+    "Catches clearly audible overshoot between samples.",
+    "Catches overshoot well beyond what's normal for a finished master.",
+    "Catches overshoot beyond typical headroom for a finished master.",
+    "Slightly stricter than this measurement's own margin of error.",
+    "Balanced default — just past this measurement's own margin of error.",
+    "Tighter than this measurement can reliably tell apart — may flag otherwise-fine masters.",
+    "Close to full volume — likely to flag normally loud tracks.",
+    "Right at the edge of measurement noise — expect false positives.",
+    "Flags anything technically over full volume, including measurement noise.",
+)
+TRUE_PEAK_DEFAULT_POSITION = 6  # matches TRUE_PEAK_THRESHOLD_DBTP (0.6)
+
+_SPECTRAL_HINTS: tuple[str, ...] = (
+    "Only catches files with near-total silence up top — very few false positives.",
+    "Requires close to true silence above the cutoff.",
+    "Requires strong silence above the cutoff frequency.",
+    "Slightly more sensitive than default.",
+    "Balanced default — matches confirmed transcodes and fake hi-res files we've tested.",
+    "Slightly more likely to flag quiet, genuine high frequencies.",
+    "Moderately sensitive — may flag naturally soft treble.",
+    "Sensitive — may flag mellow or bass-heavy mixes.",
+    "Very sensitive — expect false positives on quiet acoustic material.",
+    "Extremely sensitive — likely to flag many legitimate files.",
+)
+SPECTRAL_DEFAULT_POSITION = 5  # matches SPECTRAL_SILENCE_THRESHOLD_DB (-60)
+
+_PHASE_HINTS: tuple[str, ...] = (
+    "Only catches near-perfect phase inversion.",
+    "Requires almost exact inversion.",
+    "Slightly more sensitive than ffmpeg's own default.",
+    "ffmpeg's own default — catches clear phase problems.",
+    "Slightly more sensitive — may catch wide stereo effects.",
+    "Moderately sensitive — intentional stereo widening may trigger this.",
+    "Sensitive — likely to flag wide mixes or reverb-heavy tracks.",
+    "Very sensitive — many wide stereo mixes will trigger this.",
+    "Extremely sensitive — most stereo content will trigger this.",
+    "Nearly any decorrelated stereo signal will trigger this.",
+)
+PHASE_DEFAULT_POSITION = 4  # matches PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
+
+_NOISE_FLOOR_HINTS: tuple[str, ...] = (
+    "Only catches obviously loud background noise.",
+    "Catches clearly audible hiss or static.",
+    "Catches moderately audible background noise.",
+    "Balanced default — sits just above every clean file we measured.",
+    "Slightly more sensitive — may flag quiet room tone on live recordings.",
+    "Moderately sensitive — may flag reverb tails as noise.",
+    "Sensitive — may flag ordinary quiet passages on loud modern masters.",
+    "Very sensitive — expect false positives on many ordinary files.",
+    "Extremely sensitive — most ordinary masters will trigger this.",
+    "Nearly any measurable quiet-passage noise will trigger this.",
+)
+NOISE_FLOOR_DEFAULT_POSITION = 4  # matches NOISE_FLOOR_THRESHOLD_DB (-35)
+
+# DR14 shift isn't a gate (see Thresholds.dr14_shift) — extended to 10
+# positions (from an original 9) by adding a new most-lenient +5.0 step
+# so this slider has the same 1..10 range as every other one, rather
+# than leaving it one position short: a listener whose reference
+# material runs even heavier-compressed than the old +4.0 ceiling
+# covered now has a matching band. Lenient (positive shift) -> strict
+# (negative shift), matching every other slider's left-to-right
+# convention.
+DR14_SHIFT_STEPS: tuple[float, ...] = (5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0)
+_DR14_SHIFT_HINTS: tuple[str, ...] = (
+    "Extremely lenient — even a very heavily squashed track (DR3) won't read as Poor.",
+    "Very lenient — a very squashed-sounding track (DR4) won't read as Poor.",
+    "Lenient — a heavily squashed track (DR5) won't read as Poor.",
+    "Somewhat lenient — a squashed track (DR6) won't read as Poor.",
+    "Slightly lenient — a fairly squashed track (DR7) won't read as Poor.",
+    "Balanced default — matches the official reference scale for this measurement.",
+    "Slightly stricter — needs a bit more dynamic range (DR9) to clear \"Poor\".",
+    "Stricter — needs noticeably more dynamic range (DR10) to clear \"Poor\".",
+    "Strict — needs a lot more dynamic range (DR11) to clear \"Poor\".",
+    "Very strict — only tracks with very open dynamics (DR12+) avoid \"Poor\".",
+)
+DR14_SHIFT_DEFAULT_POSITION = 6  # matches Thresholds.dr14_shift default (0.0)
+
+_SENSITIVITY_TABLES: dict[str, tuple[tuple[float, ...], tuple[str, ...], int]] = {
+    'clip': (CLIP_STEPS, _CLIP_HINTS, CLIP_DEFAULT_POSITION),
+    'true_peak': (TRUE_PEAK_STEPS, _TRUE_PEAK_HINTS, TRUE_PEAK_DEFAULT_POSITION),
+    'spectral': (SPECTRAL_STEPS, _SPECTRAL_HINTS, SPECTRAL_DEFAULT_POSITION),
+    'phase': (PHASE_STEPS, _PHASE_HINTS, PHASE_DEFAULT_POSITION),
+    'noise_floor': (NOISE_FLOOR_STEPS, _NOISE_FLOOR_HINTS, NOISE_FLOOR_DEFAULT_POSITION),
+    'dr14_shift': (DR14_SHIFT_STEPS, _DR14_SHIFT_HINTS, DR14_SHIFT_DEFAULT_POSITION),
+}
+
+SENSITIVITY_CHECKS: tuple[str, ...] = tuple(_SENSITIVITY_TABLES)
+
+
+# @spec TH-SLIDER-001
+def sensitivity_step(check: str, position: int) -> tuple[float, str]:
+    """The calibrated (value, hint) pair for one of the six Track Health
+    sensitivity sliders at a normalized 1 (most lenient) .. 10 (most
+    strict) position. `check` is one of SENSITIVITY_CHECKS. Raises
+    ValueError for an unknown check or an out-of-range position,
+    mirroring this module's own fixed-length step tables instead of
+    silently clamping a caller's bug.
+    """
+    try:
+        steps, hints, _default = _SENSITIVITY_TABLES[check]
+    except KeyError:
+        raise ValueError(f"unknown sensitivity check {check!r}, expected one of {SENSITIVITY_CHECKS}") from None
+    if not 1 <= position <= len(steps):
+        raise ValueError(f"sensitivity position must be 1..{len(steps)}, got {position}")
+    return steps[position - 1], hints[position - 1]
+
+
+# @spec TH-SLIDER-001
+def sensitivity_default_position(check: str) -> int:
+    """The empirically-calibrated default 1-indexed position for one of
+    the six Track Health sensitivity sliders — see sensitivity_step().
+    """
+    try:
+        return _SENSITIVITY_TABLES[check][2]
+    except KeyError:
+        raise ValueError(f"unknown sensitivity check {check!r}, expected one of {SENSITIVITY_CHECKS}") from None
 
 
 def _step_score(value: float, steps: tuple[float, ...], fails: Callable[[float, float], bool]) -> float:
@@ -324,6 +457,7 @@ def _dr14_score(dr14: int, dr14_shift: float) -> float:
 # RMS can't tell apart from actual noise. Clipping/Spectral Cutoff/
 # Out-of-Phase/DR14 are direct, high-confidence measurements of the
 # decoded signal and get full weight.
+# @spec TH-SCORE-003, TH-SCORE-004
 TRACK_HEALTH_WEIGHTS: dict[str, float] = {
     'clipping': 1.0,
     'spectral_cutoff': 1.0,
@@ -358,6 +492,7 @@ TRACK_HEALTH_GOOD_THRESHOLD = 0.25
 TRACK_HEALTH_GREAT_THRESHOLD = 0.15
 
 
+# @spec TH-TIER-001
 def track_tier_from_score(score: float) -> str:
     if score >= TRACK_HEALTH_BAD_THRESHOLD:
         return "Bad"
@@ -517,6 +652,7 @@ class FfmpegVersionTooOldError(FfmpegNotFoundError):
     """
 
 
+# @spec ENGINE-VERSION-003, ENGINE-VERSION-004
 def find_ffmpeg(explicit_path: str | None = None) -> str:
     """Locate the ffmpeg binary.
 
@@ -571,6 +707,7 @@ def get_ffmpeg_version(ffmpeg_path: str) -> tuple[int, int] | None:
     return int(m.group(1)), int(m.group(2))
 
 
+# @spec ENGINE-VERSION-001, ENGINE-VERSION-002
 def check_ffmpeg_version(ffmpeg_path: str) -> None:
     """Raises FfmpegVersionTooOldError if the resolved binary is
     confirmably older than MINIMUM_FFMPEG_VERSION. Called once up front
@@ -616,6 +753,7 @@ _SUBPROCESS_KWARGS: dict[str, int] = (
 )
 
 
+# @spec ENGINE-SUBPROC-001, ENGINE-SUBPROC-003, ENGINE-SUBPROC-004, ENGINE-SUBPROC-005
 def _run_subprocess(args: list[str]) -> subprocess.CompletedProcess:
     """Every ffmpeg/ffprobe invocation in this module goes through here.
 
@@ -651,6 +789,7 @@ def _run_subprocess(args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, returncode=-1, stdout='', stderr='')
 
 
+# @spec ENGINE-SUBPROC-002
 def _run_ffmpeg_filter(
     ffmpeg: str,
     filename: str,
@@ -696,6 +835,7 @@ def _run_ffmpeg_filter(
     return proc.stderr, proc.returncode
 
 
+# @spec ENGINE-STDERR-001, ENGINE-STDERR-002
 def _filter_instance_output(stderr: str, tag: str) -> str:
     """Slices one named filter instance's lines back out of a merged
     multi-branch invocation's combined stderr (see _run_merged_analysis).
@@ -742,6 +882,7 @@ def _filter_instance_output(stderr: str, tag: str) -> str:
     return '\n'.join(result)
 
 
+# @spec ENGINE-MERGE-001
 def _run_merged_analysis(
     ffmpeg: str,
     filename: str,
@@ -872,6 +1013,7 @@ def _parse_astats(stderr: str) -> tuple[float, float | None]:
     return flat_factor, peak_db
 
 
+# @spec ENGINE-STDERR-003, ENGINE-CORRUPT-001
 def _detect_corruption_signature(merged_stderr: str) -> str | None:
     """Informational only — never gates or affects the tier, the same
     tier of certainty as hum detection: a real decoder-level signal, not
@@ -955,6 +1097,7 @@ _EBUR128_INTEGRATED_RE = re.compile(r'Integrated loudness:\s*\n\s*I:\s*(-?[\d.]+
 _EBUR128_TRUE_PEAK_RE = re.compile(r'True peak:\s*\n\s*Peak:\s*(-?[\d.]+) dBFS')
 
 
+# @spec ENGINE-STDERR-004
 def _parse_ebur128(stderr: str) -> tuple[float | None, float | None]:
     """Returns (integrated_lufs, true_peak_dbtp) from ebur128=peak=true's
     final Summary block. Only the Summary matters — the same two values
@@ -1070,6 +1213,7 @@ def _id3v1_size(fh) -> int:
     return 128 if fh.read(3) == b'TAG' else 0
 
 
+# @spec ENGINE-CORRUPT-002
 def _detect_size_mismatch(filename: str) -> SizeMismatch | None:
     """Compares the Xing/Info header's own declared audio-stream byte
     count against the real on-disk audio-stream size (file size minus
@@ -1114,6 +1258,7 @@ def _detect_size_mismatch(filename: str) -> SizeMismatch | None:
     return SizeMismatch(direction=direction, ratio=ratio, declared_bytes=declared, actual_bytes=audio_actual)
 
 
+# @spec ENGINE-CORRUPT-004
 def _detect_artwork_corruption(ffmpeg: str, ffprobe: str, filename: str) -> bool:
     """True if the file has an embedded artwork/attached-pic stream and
     ffmpeg's own decoder can't decode its first frame.
@@ -1152,6 +1297,7 @@ def _detect_artwork_corruption(ffmpeg: str, ffprobe: str, filename: str) -> bool
     return decode.returncode != 0
 
 
+# @spec ENGINE-CORRUPT-003
 def _detect_tag_structure_error(filename: str) -> str | None:
     """Parses every tag frame/block via mutagen's own generic
     `mutagen.File()` (format-detecting, used across all of Picard core's
@@ -1432,6 +1578,7 @@ def _parse_dr14_blocks(stdout: str) -> dict[int, tuple[list[float], list[float]]
     return per_channel
 
 
+# @spec ENGINE-DR14-001, ENGINE-DR14-002, ENGINE-DR14-003
 def _compute_dr14(per_channel: dict[int, tuple[list[float], list[float]]]) -> int | None:
     """Pleasurize Music Foundation DR14 formula, per channel then averaged:
     top DR14_TOP_FRACTION of blocks by RMS (power-domain average, RMS
@@ -1488,6 +1635,7 @@ SPECTROGRAM_WIDTH = 550
 SPECTROGRAM_HEIGHT = 350
 
 
+# @spec ENGINE-SPECTRO-001, ENGINE-SPECTRO-002
 def generate_spectrogram(
     filename: str, output_path: str, ffmpeg_path: str | None = None
 ) -> bool:
@@ -1565,6 +1713,7 @@ FILE_TIER_GREAT = "Good"
 FILE_TIER_EXCELLENT = "Excellent"
 
 
+# @spec FH-TIER-002, FH-TIER-003, FH-TIER-004, FH-TIER-005, FH-TIER-006, FH-TIER-007
 def _compute_file_tier(
     structural_issues: list[str], tag_artwork_issues: list[str], stream_info: StreamInfo
 ) -> str:
@@ -1650,6 +1799,7 @@ def _anchored_steps(steps: tuple[float, ...], default: float, current: float) ->
     return tuple(step + delta for step in steps)
 
 
+# @spec TH-SCORE-001, TH-SCORE-002, TH-SCORE-005
 def compute_track_score(inputs: TrackHealthInputs, thresholds: Thresholds) -> float | None:
     """Weighted-average composite in 0..1 (0 = clean, 1 = fails every
     applicable check at its most lenient calibrated setting) — see the
@@ -1702,6 +1852,7 @@ class FileHealthResult:
     stream_info: StreamInfo
 
 
+# @spec FH-TIER-001, FH-BROKEN-001, FH-BROKEN-002
 def _broken_file_health_result(filename: str, reason: str) -> FileHealthResult:
     """A file ffmpeg can't decode at all is a real, persisted File Health
     fact (`Broken`, terminal), not a transient scan error. Only
@@ -1717,6 +1868,7 @@ def _broken_file_health_result(filename: str, reason: str) -> FileHealthResult:
     )
 
 
+# @spec FH-ISSUE-001, FH-ISSUE-002
 def analyze_file_health(filename: str, ffmpeg_path: str | None = None) -> FileHealthResult:
     """Runs on a background thread. Structural-only, no sliders (see
     HANDOFF.md's "The redesign") — deliberately independent of
@@ -1827,15 +1979,23 @@ class TrackHealthResult:
     peak_db: float | None
 
 
+# @spec TH-TIER-002
 def _broken_track_health_result(filename: str, reason: str, stream_info: StreamInfo) -> TrackHealthResult:
     """Track Health is structurally impossible to measure on a file that
-    won't decode — a real, terminal outcome (`track_tier=None`), not
-    merely "not yet measured". `content_hash` and `stream_info` (from
-    ffprobe, which doesn't need a successful full decode) are kept —
-    everything that requires the decode itself is not.
+    won't decode — a real, terminal outcome, independent of any File
+    Health result for the same file (the two scans never share state —
+    see analyze_file_health's own docstring). `track_tier` is
+    FILE_TIER_BROKEN ("Unplayable"), the same string File Health uses
+    for the same underlying fact, not a bare `None`: `None` means "not
+    yet scored" elsewhere in this module (see compute_track_score), and
+    conflating that with "structurally can't ever be scored" made a
+    genuinely broken file indistinguishable from one nobody has
+    scanned yet. `content_hash` and `stream_info` (from ffprobe, which
+    doesn't need a successful full decode) are kept — everything that
+    requires the decode itself is not.
     """
     return TrackHealthResult(
-        track_tier=None,
+        track_tier=FILE_TIER_BROKEN,
         track_issues=[reason],
         info=[],
         track_score=None,
@@ -1858,6 +2018,7 @@ def _broken_track_health_result(filename: str, reason: str, stream_info: StreamI
     )
 
 
+# @spec TH-ISSUE-001, TH-SLIDER-002, TH-BRANCH-001
 def analyze_track_health(
     filename: str, ffmpeg_path: str | None = None, thresholds: Thresholds | None = None
 ) -> TrackHealthResult:

@@ -1,0 +1,63 @@
+schema_version: 2
+last_updated: 2026-09-06
+
+# Purely organizational — analysis-engine is the shared measurement layer;
+# file-health-scoring and track-health-scoring both consume it to produce a
+# tier; picard-integration is the UI/persistence layer consuming both scores.
+taxonomy:
+  scoring:
+    - file-health-scoring
+    - track-health-scoring
+  analysis-engine: standalone
+  picard-integration: standalone
+
+# Flat depth-2 tree: one HLD (docs/high-level-design.md) over four leaf LLDs.
+# No sub-HLD nodes exist, so every node below sits at the root level with no
+# parent/children links.
+arrows:
+  analysis-engine:
+    status: OK
+    sampled: 2026-09-06
+    audited: 2026-09-06
+    audited_sha: 037bb60151c2f35f47bcd4459119d319b178cd3a
+    blocks: [file-health-scoring, track-health-scoring]
+    blockedBy: []
+    detail: analysis-engine.md
+    next: null
+    drift: null
+
+  file-health-scoring:
+    status: OK
+    sampled: 2026-09-06
+    audited: 2026-09-06
+    audited_sha: 037bb60151c2f35f47bcd4459119d319b178cd3a
+    blocks: [picard-integration]
+    blockedBy: [analysis-engine]
+    detail: file-health-scoring.md
+    next: null
+    drift: null
+
+  track-health-scoring:
+    status: OK
+    sampled: 2026-09-06
+    audited: 2026-09-06
+    audited_sha: 037bb60151c2f35f47bcd4459119d319b178cd3a
+    blocks: [picard-integration]
+    blockedBy: [analysis-engine]
+    detail: track-health-scoring.md
+    next: null
+    drift: null
+
+  picard-integration:
+    status: OK
+    sampled: 2026-09-06
+    audited: 2026-09-06
+    audited_sha: 037bb60151c2f35f47bcd4459119d319b178cd3a
+    blocks: []
+    blockedBy: [file-health-scoring, track-health-scoring]
+    detail: picard-integration.md
+    next: null
+    drift: null
+
+unmapped:
+  docs: {}
