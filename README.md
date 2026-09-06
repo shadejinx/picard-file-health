@@ -36,6 +36,10 @@ Or, for local development:
 picard-cli plugins install /path/to/picard-file-health
 ```
 
+## Quickstart
+
+New to the plugin? [QUICKSTART.md](QUICKSTART.md) walks through post-installation setup, your first scan, tuning the sensitivity sliders, and reading a spectrogram.
+
 ## Configuration
 
 Open **Options → Plugins → File Health** to:
@@ -52,13 +56,16 @@ Validate the plugin manifest:
 picard-cli plugins validate .
 ```
 
-Run the test suite (requires `pytest`, `mutagen`, and `PyQt6`, plus a
-[Picard v3 checkout](https://github.com/metabrainz/picard) on `PYTHONPATH` —
-`tests/test_picard_integration.py` imports `__init__.py` directly, which in
-turn imports real `picard.*` modules):
+Run the test suite. `tests/test_picard_integration.py` imports `__init__.py`
+directly, which in turn imports real `picard.*` modules — so this needs a
+Python environment with `pytest`, `mutagen`, `PyQt6`, and Picard itself all
+importable, not a bare virtualenv with just this repo's own dependencies.
+The straightforward way to get one is [Picard's own dev setup](https://github.com/metabrainz/picard/blob/master/CONTRIBUTING.md#technical-setup)
+(`uv sync` in a Picard checkout, which installs Picard in editable mode
+alongside its own test/build dependencies):
 
 ```bash
-PYTHONPATH=/path/to/picard python3 -m pytest tests/
+/path/to/picard/.venv/bin/python3 -m pytest tests/
 ```
 
 This project follows [Linked-Intent Development](docs/high-level-design.md) — design docs, requirements, and their tests live under `docs/` and `tests/`, tracing from intent through to code.
@@ -66,6 +73,12 @@ This project follows [Linked-Intent Development](docs/high-level-design.md) — 
 ## Reporting bugs
 
 <https://github.com/shadejinx/picard-file-health/issues>
+
+## AI Use Disclosure
+
+In accordance with [MetaBrainz's AI use policy](https://github.com/metabrainz/guidelines/blob/master/README.md#ai-use-policy), this plugin's code, tests, and documentation were developed with **significant to primary AI assistance** (an agentic AI coding session), under the direction and review of the human author (`shadejinx`). This includes the plugin's architecture, the analysis engine, the test suite, and the Linked-Intent Development documentation under `docs/`.
+
+If you're reviewing this project — as a registry maintainer, a contributor, or a curious user — and have questions about any part of the implementation, please open an issue. The author is responsible for, and expects to be able to explain, every part of this codebase.
 
 ## License
 

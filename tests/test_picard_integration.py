@@ -86,6 +86,34 @@ def test_tooltip_html_escapes_issue_and_note_text(plugin, qapp, patch_tagger_ins
     assert tooltip.count('&lt;script&gt;') == 2
 
 
+def test_track_health_unplayable_gets_the_same_icon_level_as_file_health(plugin):
+    """@spec UI-COL-005"""
+    assert plugin.TRACK_TIER_ICON_LEVEL['Unplayable'] == plugin.FILE_TIER_ICON_LEVEL['Unplayable']
+
+
+def test_track_health_evaluate_ranks_unplayable_as_worst(plugin):
+    """@spec UI-COL-005"""
+    provider = plugin.TrackHealthProvider()
+    unplayable = FakeFile(metadata={'~health_track_tier': 'Unplayable'})
+    bad = FakeFile(metadata={'~health_track_tier': 'Bad'})
+    excellent = FakeFile(metadata={'~health_track_tier': 'Excellent'})
+    # A real "Unplayable" scan result must resolve to a genuine rank in
+    # TRACK_TIERS, not the same "-1" fallback used for a lookup miss
+    # (an unrecognized string) — otherwise the ordering assertion below
+    # can pass by coincidence without "Unplayable" ever being a member
+    # of TRACK_TIERS at all.
+    assert provider.evaluate(unplayable) != "-1"
+    assert int(provider.evaluate(unplayable)) < int(provider.evaluate(bad)) < int(provider.evaluate(excellent))
+
+
+def test_track_health_unplayable_is_distinguishable_from_not_yet_scanned(plugin):
+    """@spec UI-COL-005"""
+    provider = plugin.TrackHealthProvider()
+    unplayable = FakeFile(metadata={'~health_track_tier': 'Unplayable'})
+    not_yet_scanned = FakeFile(metadata={})
+    assert provider.evaluate(unplayable) != provider.evaluate(not_yet_scanned)
+
+
 # --- Actions ---
 
 def test_file_health_action_registered_for_files_clusters_and_tracks(plugin, patch_tagger_instance):

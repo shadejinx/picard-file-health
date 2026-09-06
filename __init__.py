@@ -69,22 +69,26 @@ from . import help_content
 
 
 # Ordered worst-to-best, matching analysis.py's FILE_TIER_*/track_tier_
-# from_score constants exactly. File Health has a terminal `Unplayable`
-# tier Track Health can't reach (a file that won't decode has nothing
-# to measure perceptually — see analysis.analyze_file's docstring).
+# from_score constants exactly. Both scores share the same five-level
+# vocabulary, including the terminal `Unplayable` tier — a decode
+# failure is the identical underlying fact for both scans (see
+# analysis.analyze_track_health's docstring), so both use the same
+# sort rank and icon level for it (see UI-COL-005).
+# @spec UI-COL-005
 FILE_TIERS = ("Unplayable", "Bad", "OK", "Good", "Excellent")
-TRACK_TIERS = ("Bad", "OK", "Good", "Excellent")
+TRACK_TIERS = ("Unplayable", "Bad", "OK", "Good", "Excellent")
 
 # picard.ui.match_icons ships 6 bookmark levels (0=worst red, 5=best
 # green). Mapped explicitly rather than evenly spread across all 6 so
 # the visual jump from a real defect (Bad) to a clean file (OK) stays
 # the same big red->green jump it was under the old 6-tier scale, with
 # only the top three tiers (OK/Good/Excellent) using the finer
-# upper-range distinctions. Track Health omits level 0 entirely — a
-# perceptual "Bad" is still a real defect, but nothing it measures is
-# as unambiguous as File Health's Unplayable (a file that won't even play).
+# upper-range distinctions. Track Health's Unplayable reuses File
+# Health's own level 0 rather than a distinct one, since both represent
+# the identical underlying fact — the file won't decode at all — not
+# two different severities that merely look similar (see UI-COL-005).
 FILE_TIER_ICON_LEVEL = {"Unplayable": 0, "Bad": 1, "OK": 3, "Good": 4, "Excellent": 5}
-TRACK_TIER_ICON_LEVEL = {"Bad": 1, "OK": 3, "Good": 4, "Excellent": 5}
+TRACK_TIER_ICON_LEVEL = {"Unplayable": 0, "Bad": 1, "OK": 3, "Good": 4, "Excellent": 5}
 
 
 class _NoWheelSlider(QtWidgets.QSlider):
@@ -1914,7 +1918,7 @@ def enable(api: PluginApi) -> None:
     )
     api.register_script_variable(
         '_health_track_tier',
-        documentation="Track Health tier from the last scan (Bad/OK/Good/Excellent); empty if the file is Unplayable.",
+        documentation="Track Health tier from the last scan (Unplayable/Bad/OK/Good/Excellent).",
         title="Track Health",
     )
     api.register_script_variable(
