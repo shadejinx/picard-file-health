@@ -19,7 +19,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: c31a7e90512bdc133211dd281f6b75274c1b1ac7
+    audited_sha: 5b8d2e44cb567106c32d743bd49e25e17eba4583
     blocks: [file-health-scoring, track-health-scoring]
     blockedBy: []
     detail: analysis-engine.md
@@ -30,7 +30,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: c31a7e90512bdc133211dd281f6b75274c1b1ac7
+    audited_sha: 5b8d2e44cb567106c32d743bd49e25e17eba4583
     blocks: [picard-integration]
     blockedBy: [analysis-engine]
     detail: file-health-scoring.md
@@ -41,7 +41,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: c31a7e90512bdc133211dd281f6b75274c1b1ac7
+    audited_sha: 5b8d2e44cb567106c32d743bd49e25e17eba4583
     blocks: [picard-integration]
     blockedBy: [analysis-engine]
     detail: track-health-scoring.md
@@ -52,7 +52,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: c31a7e90512bdc133211dd281f6b75274c1b1ac7
+    audited_sha: 5b8d2e44cb567106c32d743bd49e25e17eba4583
     blocks: []
     blockedBy: [file-health-scoring, track-health-scoring]
     detail: picard-integration.md
