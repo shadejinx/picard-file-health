@@ -31,14 +31,18 @@ matched track to run.</p>
 <ul>
 <li><b>Unplayable</b>: ffmpeg couldn't decode it at all (corrupt,
 truncated, unsupported, or timed out).</li>
-<li><b>Bad</b>: decodes, but has a structural defect, such as an audio
-corruption signature, a file-size mismatch against its own header, corrupt
-embedded artwork, or a malformed tag structure.</li>
+<li><b>Bad</b>: decodes, but has a genuine structural defect in the audio
+data itself, such as an audio corruption signature or a file-size
+mismatch against its own header — nothing short of re-encoding from a
+clean source fixes these.</li>
 <li><b>OK</b> / <b>Good</b> / <b>Excellent</b>: structurally sound,
-graded purely by codec and bitrate. Lossless formats (FLAC, ALAC, WavPack,
-TTA, APE, uncompressed PCM) are always Excellent. Lossy formats are graded
-against the published "generally transparent" bitrate for that codec (see
-the Checks &amp; Why tab): at or above it is Good, below it is OK.</li>
+graded purely by codec and bitrate. Corrupt embedded artwork or a
+malformed tag structure cap a file at OK rather than forcing Bad, since
+Picard itself fixes both by re-saving the file. Lossless formats (FLAC,
+ALAC, WavPack, TTA, APE, uncompressed PCM) are always Excellent when
+structurally sound. Lossy formats are graded against the published
+"generally transparent" bitrate for that codec (see the Checks &amp;
+Why tab): at or above it is Good, below it is OK.</li>
 </ul>
 
 <h3>Track Health</h3>
@@ -87,9 +91,11 @@ within 0.43% (encoder rounding noise); four outliers sat at
 21%-182%, three of which also independently showed the corruption
 signature above.</li>
 <li><b>Corrupt embedded artwork.</b> ffmpeg's own image decoder can't
-decode the file's embedded picture.</li>
+decode the file's embedded picture. Caps the file at OK rather than
+forcing Bad — Picard itself fixes this by re-adding artwork.</li>
 <li><b>Malformed tag structure.</b> Mutagen's own generic tag-frame parser
-fails to parse a tag block.</li>
+fails to parse a tag block. Also caps at OK rather than Bad, for the same
+reason: re-saving the file's tags in Picard fixes it.</li>
 <li><b>Bitrate/codec transparency.</b> Informational grading, not a
 defect: HydrogenAudio/Xiph's own published listening-test consensus for
 "generally transparent" is MP3 at/above 192kbps, plain AAC-LC at/above
@@ -215,12 +221,6 @@ has no Out-of-Phase reading) or not yet measured.</li>
 </ul>
 <p>Hover any stoplight cell for the exact measured value and a
 plain-language explanation of what it means for the audio.</p>
-
-<h2>Bolding</h2>
-<p>Within a group, if exactly one file scores strictly higher than every
-other copy (File Tier compared first, then Track Tier), that row is bolded
-as a subtle "this copy looks healthiest" cue. Ties are never broken for
-you; the numbers are shown side by side, and the choice is yours.</p>
 
 <h2>Buttons</h2>
 <ul>
