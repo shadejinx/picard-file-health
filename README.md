@@ -36,6 +36,8 @@ Or, for local development:
 picard-cli plugins install /path/to/picard-file-health
 ```
 
+Or, without `picard-cli`: download the `picard-file-health-<version>.zip` asset from the [releases page](https://github.com/shadejinx/picard-file-health/releases) (not GitHub's auto-generated "Source code" zip — its unzipped folder name contains dots from the version number, which breaks the plugin's relative imports) and copy the extracted `picard-file-health/` folder into Picard's plugins3 directory.
+
 ## Quickstart
 
 New to the plugin? [QUICKSTART.md](QUICKSTART.md) walks through post-installation setup, your first scan, tuning the sensitivity sliders, and reading a spectrogram.
