@@ -20,7 +20,7 @@ file to a track, or scanning one, doesn't touch the other's data.</p>
 signatures, check the embedded artwork/tag structure, compare the file's
 declared size against a header's own byte count, and grade the codec/bitrate
 against published transparency thresholds. There are no sensitivity sliders
-for this one; a file either has a real structural defect or it doesn't, so
+for this one; a file either has a structural defect or it doesn't, so
 there's nothing to tune.</p>
 <p>Runs automatically on newly added files if "Automatically scan File
 Health for newly added files" is checked above; otherwise (or at any time),
@@ -31,7 +31,7 @@ matched track to run.</p>
 <ul>
 <li><b>Unplayable</b>: ffmpeg couldn't decode it at all (corrupt,
 truncated, unsupported, or timed out).</li>
-<li><b>Bad</b>: decodes, but has a real structural defect, such as an audio
+<li><b>Bad</b>: decodes, but has a structural defect, such as an audio
 corruption signature, a file-size mismatch against its own header, corrupt
 embedded artwork, or a malformed tag structure.</li>
 <li><b>OK</b> / <b>Good</b> / <b>Excellent</b>: structurally sound,
@@ -42,7 +42,7 @@ the Checks &amp; Why tab): at or above it is Good, below it is OK.</li>
 </ul>
 
 <h3>Track Health</h3>
-<p>A heavier scan: a real decode plus several ffmpeg audio-analysis passes
+<p>A heavier scan: a full decode plus several ffmpeg audio-analysis passes
 measuring clipping, inter-sample peaks, spectral cutoff, out-of-phase
 channels, background noise floor, and dynamic range. It's always manual;
 right-click a matched track and choose <b>Scan Track Health...</b>, or use
@@ -60,7 +60,7 @@ just a fraction of a dB over its threshold, can't push a file to "Bad" on
 its own; that verdict is reserved for files where several checks agree, or
 one is badly wrong. The sliders under "Track Health Sensitivity" above each
 move their check's own threshold directly, which reshapes the composite
-score in real time on the next scan.</p>
+score the next time you scan.</p>
 """
 
 _CHECKS_HTML = """
@@ -72,18 +72,18 @@ Unplayable.</li>
 <li><b>Audio corruption signature.</b> ffmpeg's own MP3 decoder logs a
 <code>bits_left</code> diagnostic when a frame's bit-reservoir pointer
 decodes to an impossible value, a genuine internal inconsistency rather
-than a guess. Validated against 600 real files spanning five real
+than a guess. Validated against 600 files spanning five audio
 libraries: 99.2% showed zero occurrences (including one file independently
 confirmed clean by ear despite thousands of unrelated, harmless
 "overread" warnings), while every engineered corruption fixture produced
 at least one.</li>
 <li><b>File-size mismatch.</b> Compares the Xing/Info VBR header's own
-declared audio-stream byte count against the real bytes on disk (minus any
+declared audio-stream byte count against the actual bytes on disk (minus any
 ID3 tag wrapper). A mismatch beyond 5%, independent of any decode, is a
-real structural fact that the file was altered after encoding: data
+structural fact that the file was altered after encoding: data
 appended after the original stream ended, or the file cut
-short. Calibrated against a real 500-file sample: ordinary files landed
-within 0.43% (encoder rounding noise); four real outliers sat at
+short. Calibrated against a 500-file sample: ordinary files landed
+within 0.43% (encoder rounding noise); four outliers sat at
 21%-182%, three of which also independently showed the corruption
 signature above.</li>
 <li><b>Corrupt embedded artwork.</b> ffmpeg's own image decoder can't
@@ -112,7 +112,7 @@ the theoretical 0dBTP ceiling to stay outside that same standard's own
 documented ~0.554dB measurement margin at 4x oversampling, so a
 technically compliant master isn't penalized for the meter's own
 uncertainty.</li>
-<li><b>Spectral Cutoff (TRB) / Fake Hi-Res (HRS).</b> Checks for real
+<li><b>Spectral Cutoff (TRB) / Fake Hi-Res (HRS).</b> Checks for
 energy above 17kHz (ordinary-rate files) or above 24kHz (hi-res-rate files
 above 48kHz). A hard silence wall there is the signature of an earlier
 lossy encode (a transcode) or of upsampling from an ordinary-rate source
@@ -130,8 +130,8 @@ perfectly in-phase.</li>
 <li><b>Noise Floor (NSF).</b> Broadband RMS level measured in the track's
 own longest quiet passage (found via silencedetect). An elevated level
 there (hiss, static, or mastering-chain self-noise) that persists even
-once the music itself has dropped out is real background noise. Default
-threshold: -35dB, calibrated against this project's own real-track sample
+once the music itself has dropped out counts as background noise. Default
+threshold: -35dB, calibrated against this project's own sample of tracks
 (measured noise floors ranged -66.4dB to -37.5dB).</li>
 <li><b>Dynamic Range / DR14 (DYN, "Compression Tolerance").</b> The
 Pleasurize Music Foundation "TT DR Meter" algorithm: the top 20% loudest
@@ -145,7 +145,7 @@ exposing each boundary separately.</li>
 <p><b>Why some checks count more than others:</b> Clipping, Spectral
 Cutoff, Out-of-Phase, and DR14 get full weight in the composite score.
 They're direct, high-confidence measurements of the decoded signal. True
-Peak and Fake Hi-Res get reduced weight, since real-world readings for
+Peak and Fake Hi-Res get reduced weight, since practical readings for
 both tend to sit close to their own meters' documented uncertainty
 margins. Noise Floor (and Mains Hum, below) get medium weight, since an
 elevated reading can be a genuine defect but can't always be told apart
@@ -156,7 +156,7 @@ tail, or a sustained musical drone at the same pitch.</p>
 <ul>
 <li><b>Mains Hum.</b> A sustained, narrow tone at the local power-grid
 frequency (50Hz or 60Hz) found specifically inside quiet passages, never
-checked across the whole file, precisely because a real musical note at
+checked across the whole file, precisely because an actual musical note at
 the same pitch would stop when the rest of the music does, while hum
 doesn't. Flagged when a narrowband spike measures 8dB or more above a
 nearby control frequency.</li>
@@ -164,10 +164,10 @@ nearby control frequency.</li>
 identical. That's not a defect, just a note that no unique stereo
 information actually exists.</li>
 <li><b>Bandwidth / Stereo Coherence.</b> Plain-language notes describing
-how much real high-frequency content is present and how correlated the
+how much high-frequency content is present and how correlated the
 left/right channels are. Both are cause-agnostic (a naturally
 treble-light acoustic recording or an intentionally wide mix reads
-identically to a real defect), so Spectral Cutoff and Out-of-Phase remain
+identically to an actual defect), so Spectral Cutoff and Out-of-Phase remain
 the actual gates; these are just supporting context.</li>
 <li><b>Live-recording context.</b> When Picard's own matched release type
 (or the track title) says "Live", the Spectral Cutoff, Noise Floor, and
@@ -272,7 +272,7 @@ measures.</li>
 <li><b>A thin, bright vertical stripe spanning many frequencies at one
 instant</b>: a broadband click or pop, a likely sign of localized
 damage (bitrot, a bad edit, a transfer glitch). A legitimate percussive
-hit (a cymbal crash, a snare) can look similar at a glance; a real defect
+hit (a cymbal crash, a snare) can look similar at a glance; a genuine defect
 is usually much shorter than an actual drum hit and looks disconnected
 from the surrounding music rather than part of its natural attack.
 Zooming in, or comparing the same instant against a known-clean copy,

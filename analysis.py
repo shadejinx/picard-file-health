@@ -1884,7 +1884,7 @@ def analyze_track_health(
             # ordinary-rate source, not actually recorded/mastered at its
             # declared rate.
             track_issues.append(
-                f"Labeled as {stream_info.sample_rate}Hz hi-res audio, but has no real sound "
+                f"Labeled as {stream_info.sample_rate}Hz hi-res audio, but has no sound "
                 f"above {FAKE_HIRES_CHECK_FREQUENCY_HZ / 1000:.0f}kHz — likely stretched up "
                 f"from an ordinary file rather than genuine hi-res{_tunable('Spectral Cutoff')}"
             )
