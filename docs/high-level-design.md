@@ -73,6 +73,20 @@ graph TD
 - **No shell, ever.** Every ffmpeg/ffprobe call passes argv as a list to `subprocess.run`, never a shell string — a scanned filename is adversary-controlled in the general case (a downloaded file), and shell interpretation of that filename is a class of bug this design refuses to introduce.
 - **help_content.py is 100% static.** The in-app Help dialog never interpolates a filename, tag value, or any other file-derived string into its HTML — it explains the checks and thresholds themselves, not any one file's specific results. This keeps one whole surface of the plugin immune by construction to any HTML/script-injection concern from crafted file content.
 
+## Security Model
+
+Picard v3 does not sandbox plugins: a plugin runs with the same system access as Picard itself, and Picard's own security model (see [Picard's Plugin Security Model](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/SECURITY.md)) relies on trust levels, a blacklist, and user education rather than runtime containment — deliberately, since Python itself can't be meaningfully sandboxed. That places the entire security burden for this plugin's own behavior on the plugin, not on Picard's host process.
+
+File Health's security posture, concretely:
+
+- **Every file scanned is untrusted input.** A file's bytes, tags, and embedded artwork can be corrupt, truncated, or adversarially crafted regardless of its extension. The analysis engine treats this as its core correctness property, not optional hardening — see "ffmpeg's own stderr diagnostic output is parsed defensively" and "No shell, ever." above, and the File Health LLD's own hardening work.
+- **Zero network access.** File Health never opens a network connection, uploads file content or metadata, or checks for updates itself — every measurement is a local `ffmpeg`/`ffprobe` invocation against a file already on disk (see Non-Goals).
+- **No dynamic code execution.** The plugin never evaluates, executes, or deserializes code constructed from file-derived or tag-derived data — no `eval`, `exec`, or unpickling of untrusted content anywhere in the codebase.
+- **Minimal dependency surface.** Beyond what Picard itself provides (`PyQt6`, `mutagen`) and the user's own `ffmpeg` binary, the plugin adds no third-party dependencies — fewer dependencies is less surface a supply-chain compromise could reach.
+- **Capabilities documented plainly.** Since a user evaluating a Community- or Unregistered-trust plugin is expected to read what it does before installing, the README states exactly what File Health touches on a user's machine (local `ffmpeg`/`ffprobe` subprocess execution, one temporary spectrogram file, file metadata writes, no network access) rather than leaving it to be inferred from the feature list.
+
+What this plugin does **not** attempt: defending against a compromised `ffmpeg` binary or a vulnerability inside `ffmpeg` itself (the plugin's own trust boundary starts after `ffmpeg`'s own security guarantees — see Non-Goals), and enforcing any of the above at runtime against its own future code changes — these are design commitments verified by code review and tests, not a sandbox nothing here could actually construct.
+
 ## Success Metrics
 
 - A scan of a real, mixed-quality library produces a "Bad" File Health list that, spot-checked, is dominated by files with confirmable structural defects (not false positives) — falsified by a spot-check majority of "Bad" files playing back audibly fine with no confirmable structural issue.
@@ -84,3 +98,4 @@ graph TD
 - [ffmpeg filter documentation](https://ffmpeg.org/ffmpeg-filters.html) (`astats`, `volumedetect`, `ebur128`, `aphasemeter`, `silencedetect`, `showspectrumpic`) — the measurement primitives every check in `analysis.py` is built from.
 - [Pleasurize Music Foundation / MAAT DR Offline Meter](https://www.maat.digital/droffline/) — the DR14 dynamic-range algorithm Track Health reimplements against ffmpeg's own `astats` output.
 - [HydrogenAudio transparency listening-test consensus](https://wiki.hydrogenaudio.org/index.php?title=Transparency) — the basis for the below-transparency-bitrate informational note.
+- [Picard Plugin Security Model](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/SECURITY.md) — the trust-based, no-sandboxing model this plugin's own Security Model section above is designed against.

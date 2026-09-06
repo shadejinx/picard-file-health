@@ -325,6 +325,7 @@ def _scan_track_health_one(filename: str, ffmpeg_path: str | None, thresholds: a
         'hires_cutoff_db': result.spectral_energy_above_hires_cutoff_db,
         'is_out_of_phase': result.is_out_of_phase,
         'is_mono_duplicated': result.is_mono_duplicated,
+        'has_mains_hum': result.has_mains_hum,
         'peak_db': result.peak_db,
         'codec_name': result.stream_info.codec_name,
         'profile': result.stream_info.profile,
@@ -391,6 +392,7 @@ _HEALTH_METADATA_KEYS: tuple[str, ...] = (
     '~health_bandwidth_hz', '~health_noise_floor_db', '~health_dr14', '~health_stereo_coherence',
     '~health_true_peak_dbtp', '~health_clip_flat_factor', '~health_spectral_cutoff_db',
     '~health_hires_cutoff_db', '~health_is_out_of_phase', '~health_is_mono_duplicated',
+    '~health_has_mains_hum',
     '~health_peak_db', '~health_codec_name', '~health_profile', '~health_bitrate_kbps',
     '~health_sample_rate', '~health_channels',
 )
@@ -501,6 +503,7 @@ def _track_health_scan_finished(file: File, result: dict[str, object] | None, er
             file.metadata['~health_hires_cutoff_db'] = _encode_metric(result['hires_cutoff_db'])
             file.metadata['~health_is_out_of_phase'] = _encode_bool(result['is_out_of_phase'])
             file.metadata['~health_is_mono_duplicated'] = _encode_bool(result['is_mono_duplicated'])
+            file.metadata['~health_has_mains_hum'] = _encode_bool(result['has_mains_hum'])
             file.metadata['~health_peak_db'] = _encode_metric(result['peak_db'])
             # Track Health's own (heavier) decode probes stream info too —
             # harmless to refresh these shared, scan-type-agnostic fields
@@ -857,14 +860,18 @@ _STATE_COLORS: dict[str, tuple[QtGui.QColor, QtGui.QColor]] = {
 _STATE_EMOJI: dict[str, str] = {'pass': '✅', 'amber': '⚠️', 'fail': '❌', 'na': '➖'}
 
 # check label -> 3-4 letter tag matching its Options-page slider (see
-# HealthOptionsPage). Fake Hi-Res has no dedicated slider of its own — it
-# shares Spectral Cutoff's spectral-silence threshold.
+# HealthOptionsPage). Fake Hi-Res and Mains Hum have no dedicated slider
+# of their own — Fake Hi-Res shares Spectral Cutoff's spectral-silence
+# threshold, and Mains Hum is a fixed binary detection (see
+# UI-DETAILS-003: every composite-score check gets a matrix column
+# regardless of whether it has its own slider).
 _CHECK_TAGS: dict[str, str] = {
     'Clipping': 'CLP',
     'True Peak': 'TPK',
     'Spectral Cutoff': 'TRB',
     'Out-of-Phase': 'PHS',
     'Fake Hi-Res': 'HRS',
+    'Mains Hum': 'HUM',
     'Noise Floor': 'NSF',
 }
 _CHECK_COLUMNS = list(_CHECK_TAGS)
@@ -1000,6 +1007,13 @@ def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple
         cells['Out-of-Phase'] = ('fail', "Channels cancel out \u2014 sounds hollow on mono speakers.")
     else:
         cells['Out-of-Phase'] = ('pass', "Channels are correlated normally.")
+    has_mains_hum = _decode_bool(file.metadata['~health_has_mains_hum'])
+    if has_mains_hum is None:
+        cells['Mains Hum'] = ('na', "Not measured, or no quiet passage found.")
+    elif has_mains_hum:
+        cells['Mains Hum'] = ('fail', "Possible mains hum (electrical buzz) detected in a quiet passage.")
+    else:
+        cells['Mains Hum'] = ('pass', "No mains hum detected.")
     return cells
 
 

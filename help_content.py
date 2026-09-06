@@ -159,6 +159,14 @@ there (hiss, static, or mastering-chain self-noise) that persists even
 once the music itself has dropped out counts as background noise. Default
 threshold: -35dB, calibrated against this project's own sample of tracks
 (measured noise floors ranged -66.4dB to -37.5dB).</li>
+<li><b>Mains Hum (HUM).</b> A sustained, narrow tone at the local
+power-grid frequency (50Hz or 60Hz), measured specifically inside the same
+quiet passage Noise Floor uses — never checked across the whole file,
+precisely because an actual musical note at the same pitch would stop
+when the rest of the music does, while hum doesn't. Flagged when a
+narrowband spike measures 8dB or more above a nearby control frequency.
+No dedicated slider of its own — this is a fixed binary detection, not a
+tunable threshold.</li>
 <li><b>Dynamic Range / DR14 (DYN, "Compression Tolerance").</b> The
 Pleasurize Music Foundation "TT DR Meter" algorithm: the top 20% loudest
 of non-overlapping 3-second blocks, compared against the second-highest
@@ -173,19 +181,13 @@ Cutoff, Out-of-Phase, and DR14 get full weight in the composite score.
 They're direct, high-confidence measurements of the decoded signal. True
 Peak and Fake Hi-Res get reduced weight, since practical readings for
 both tend to sit close to their own meters' documented uncertainty
-margins. Noise Floor (and Mains Hum, below) get medium weight, since an
+margins. Noise Floor and Mains Hum get medium weight, since an
 elevated reading can be a genuine defect but can't always be told apart
 with full certainty from legitimate content such as room tone, a reverb
 tail, or a sustained musical drone at the same pitch.</p>
 
 <h2>Informational only (shown as notes, never affect the tier)</h2>
 <ul>
-<li><b>Mains Hum.</b> A sustained, narrow tone at the local power-grid
-frequency (50Hz or 60Hz) found specifically inside quiet passages, never
-checked across the whole file, precisely because an actual musical note at
-the same pitch would stop when the rest of the music does, while hum
-doesn't. Flagged when a narrowband spike measures 8dB or more above a
-nearby control frequency.</li>
 <li><b>Mono content in a stereo container.</b> Left and right channels are
 identical. That's not a defect, just a note that no unique stereo
 information actually exists.</li>
@@ -219,12 +221,13 @@ group.</p>
 <tr><td>File / File Tier / Track Tier</td><td>Filename and both tiers'
 current verdicts (or "Not yet scanned").</td></tr>
 <tr><td>Format</td><td>Codec, bitrate, sample rate, and channel count.</td></tr>
-<tr><td>CLP / TPK / TRB / PHS / HRS / NSF</td><td>One stoplight per
-perceptual check; each tag matches the sensitivity slider that controls
-it on the Options page.</td></tr>
+<tr><td>CLP / TPK / TRB / PHS / HRS / HUM / NSF</td><td>One stoplight per
+perceptual check. Most tags match the sensitivity slider that controls
+them on the Options page; HRS shares TRB's slider and HUM has no slider
+at all (see Checks).</td></tr>
 <tr><td>DYN</td><td>Dynamic Range band (Poor/Ok/Good/Great/Excellent,
 DR14's own rating scale).</td></tr>
-<tr><td>Notes</td><td>Every informational note (bitrate grading, mains hum,
+<tr><td>Notes</td><td>Every informational note (bitrate grading,
 bandwidth, stereo coherence, live-recording caveats, stale-scan
 warnings).</td></tr>
 </table>

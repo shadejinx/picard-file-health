@@ -19,7 +19,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: 5b8d2e44cb567106c32d743bd49e25e17eba4583
+    audited_sha: 59b11440fca982ea4de546b570620398eb7ba800
     blocks: [file-health-scoring, track-health-scoring]
     blockedBy: []
     detail: analysis-engine.md
@@ -52,7 +52,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: 5b8d2e44cb567106c32d743bd49e25e17eba4583
+    audited_sha: 59b11440fca982ea4de546b570620398eb7ba800
     blocks: []
     blockedBy: [file-health-scoring, track-health-scoring]
     detail: picard-integration.md

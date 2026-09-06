@@ -262,3 +262,33 @@ def test_spectrogram_reports_failure_for_undecodable_input(tmp_path, undecodable
     out = tmp_path / "spectrogram_fail.png"
     ok = analysis.generate_spectrogram(undecodable_file, str(out), ffmpeg_path=ffmpeg_path)
     assert ok is False
+
+
+# --- Security Posture ---
+
+def test_engine_never_evaluates_deserializes_or_shells_out_dynamically():
+    """@spec ENGINE-SEC-001
+
+    Static guard: nothing in analysis.py may construct code from
+    file-derived data via eval/exec/pickle/marshal, or invoke a
+    subprocess through a shell — the properties this engine's own
+    "untrusted input" design relies on, guarded here so a future
+    change can't silently reintroduce one.
+    """
+    import inspect
+    source = inspect.getsource(analysis)
+    for forbidden in ("eval(", "exec(", "pickle.load", "marshal.load", "shell=True"):
+        assert forbidden not in source, f"found forbidden pattern {forbidden!r} in analysis.py"
+
+
+def test_engine_never_opens_a_network_connection():
+    """@spec ENGINE-SEC-002
+
+    Static guard: nothing in analysis.py may import a networking
+    module — the engine's every measurement is a local ffmpeg/ffprobe
+    invocation against a file already on disk.
+    """
+    import inspect
+    source = inspect.getsource(analysis)
+    for forbidden in ("import socket", "import urllib", "import requests", "import http.client", "import ftplib"):
+        assert forbidden not in source, f"found forbidden import {forbidden!r} in analysis.py"

@@ -65,9 +65,9 @@ For a closer look at one or more files (especially useful when comparing duplica
 The Details window shows, per file:
 
 - Both tiers (File Health, Track Health) and basic format info (codec, bitrate, sample rate, channels).
-- One "stoplight" cell per perceptual check (green = comfortably clear, amber = passes but would fail one slider notch stricter, red = fails, gray = not applicable or not yet measured). Hover any cell for the exact measured value.
+- One "stoplight" cell per perceptual check, including Mains Hum (which has no slider of its own) — green = comfortably clear, amber = passes but would fail one slider notch stricter, red = fails, gray = not applicable or not yet measured. Hover any cell for the exact measured value.
 - A Dynamic Range band (Poor/Ok/Good/Great/Excellent).
-- A Notes column with everything informational: bitrate grading, mains hum, bandwidth, stereo coherence, live-recording context, and "changed since last scan" warnings.
+- A Notes column with everything informational: bitrate grading, bandwidth, stereo coherence, live-recording context, and "changed since last scan" warnings.
 
 This window stays open and updates live as scans finish, so there's no need to close and reopen it. Full details: **Help → The Details Window**.
 

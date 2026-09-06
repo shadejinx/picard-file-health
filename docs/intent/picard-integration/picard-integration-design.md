@@ -7,9 +7,9 @@ prefix: UI
 
 ## Context and Design Philosophy
 
-This leaf owns every point of contact between the two scoring engines (File Health, Track Health) and Picard's own UI: tree columns, right-click actions, the Options page, the Details window, the spectrogram viewer, and the in-app Help dialog. It lives entirely in `__init__.py` and contains no ffmpeg-invocation logic of its own — every measurement call goes through the analysis engine.
+This leaf owns every point of contact between the two scoring engines (File Health, Track Health) and Picard's own UI: tree columns, right-click actions, the Options page, the Details window, the spectrogram viewer, the in-app Help dialog, and the plugin's overall security posture. It lives entirely in `__init__.py` and contains no ffmpeg-invocation logic of its own — every measurement call goes through the analysis engine.
 
-These six sub-features share one parent intent (surfacing and acting on health results inside Picard's existing workflow) rather than being six unrelated concerns bundled together, which is why they're kept as facets of one leaf rather than six separate LLDs. Given `__init__.py`'s size, this leaf is an explicit candidate for future promotion to a sub-HLD with each facet below becoming its own child LLD, if it outgrows itself further — not a decision made now, since none of the six facets has yet grown past what a shared leaf can hold coherently.
+These seven sub-features share one parent intent (surfacing and acting on health results inside Picard's existing workflow, and being transparent about what the plugin does) rather than being unrelated concerns bundled together, which is why they're kept as facets of one leaf rather than separate LLDs. Given `__init__.py`'s size, this leaf is an explicit candidate for future promotion to a sub-HLD with each facet below becoming its own child LLD, if it outgrows itself further — not a decision made now, since none of the facets has yet grown past what a shared leaf can hold coherently.
 
 ## Facet: Columns
 
@@ -31,7 +31,7 @@ Configures the ffmpeg binary path (validated against `PATH` with a manual overri
 
 ## Facet: Details Window
 
-A non-modal panel showing File Health/Track Health details for any selected files, grouping matched duplicates together for side-by-side comparison (as well as singleton and completely unmatched files) — the primary use case is deciding which of several near-duplicate files to keep. Per-check matrix cells recompute live from each file's stored raw measurements against the *current* slider settings, not the tier baked in at last scan time — so adjusting a slider updates the Details window's display immediately without requiring a re-scan. An old scan whose stored data predates a check added later simply has no raw value for that check, which the scoring function already excludes the same way it excludes any other unmeasured input — no special "insufficient data" case needed beyond the graceful-degradation convention every check already follows. The healthiest copy in a group of duplicates is subtly bolded as a visual cue when ranking is unambiguous.
+A non-modal panel showing File Health/Track Health details for any selected files, grouping matched duplicates together for side-by-side comparison (as well as singleton and completely unmatched files) — the primary use case is deciding which of several near-duplicate files to keep. The check matrix mirrors every check that contributes to the Track Health composite score, including checks with no dedicated Options-page slider (Fake Hi-Res, Mains Hum) — a check that can move the tier but has no comparison column would leave a user unable to see why two otherwise-identical files (e.g. ripped in the same session) land on different tiers. Per-check matrix cells recompute live from each file's stored raw measurements against the *current* slider settings, not the tier baked in at last scan time — so adjusting a slider updates the Details window's display immediately without requiring a re-scan. An old scan whose stored data predates a check added later simply has no raw value for that check, which the scoring function already excludes the same way it excludes any other unmeasured input — no special "insufficient data" case needed beyond the graceful-degradation convention every check already follows. The healthiest copy in a group of duplicates is subtly bolded as a visual cue when ranking is unambiguous.
 
 ## Facet: Spectrogram Viewer
 
@@ -40,6 +40,10 @@ An on-demand visual check (a button in the Details window) for cases where a num
 ## Facet: Help Dialog
 
 A four-tab in-app reference (what each tier means for both scores, what each check does, the Details window's own UI conventions, troubleshooting) built entirely from static HTML strings in `help_content.py` — no filename, tag value, or any other file-derived string is ever interpolated into it. This is a deliberate, structural guarantee: the Help dialog explains the checks and thresholds themselves, never any one file's specific results, so it's immune by construction to any injection concern a crafted file's tag content might otherwise raise. Enforced by convention only today (no test asserts the Help content is input-independent); a future regression test is reasonable but not urgent.
+
+## Facet: Security Posture
+
+Picard v3 does not sandbox plugins — see the HLD's Security Model section for the full trust-based posture this facet implements. Concretely, this leaf is the plugin's outward-facing surface, so it owns making that posture legible to a user deciding whether to install a Community- or Unregistered-trust plugin: the README states plainly what the plugin touches on a user's machine (local `ffmpeg`/`ffprobe` subprocess execution, one temporary spectrogram file, file metadata writes) and that it makes no network connections. This is a documentation commitment, not a runtime-enforced one — nothing in this leaf can prevent a future code change from adding a network call any more than nothing prevents any other regression; the guarantee is upheld by code review and the "no dynamic code execution"/"no shell" properties the analysis engine LLD already enforces as testable structural checks.
 
 ## Metadata Persistence
 
@@ -57,15 +61,18 @@ Scan results persist as `~health_*` Picard metadata fields on the file itself: t
 | Details-window re-scoring | Live recomputation from stored raw measurements against current slider settings | Redisplay the tier baked in at last scan time | Adjusting a slider should update the Details window immediately without forcing a re-scan — the raw measurements are already stored; only the threshold comparison needs to be redone. |
 | Help dialog content | 100% static HTML, zero dynamic interpolation | Interpolate the currently-selected file's own results into contextual help text | [inferred] Keeping this surface static makes it structurally immune to any HTML/injection concern a crafted file's tag content could otherwise raise, at the cost of the help text never being able to reference "your specific file's result" directly. |
 | Track Health Unplayable icon level | Reuse File Health's own level 0 | A distinct icon level for Track Health's Unplayable | Both represent the identical underlying fact (the file won't decode at all), not two different severities that merely look similar — a distinct level would visually imply a difference that doesn't exist. |
+| Details-window matrix completeness | Every Track Health composite-score check gets a column, including checks with no dedicated slider (Fake Hi-Res, Mains Hum) | Only checks with a dedicated Options-page slider get a column | A slider-only rule silently excludes any check the composite score weighs but the Options page doesn't expose a control for — exactly the gap that let Mains Hum move a file to `Bad` with no visible reason in a side-by-side comparison. |
+| Security-posture documentation | State capabilities plainly in the README (subprocess execution, one temp file, no network access) | Leave capabilities to be inferred from the feature list | Picard's own plugin model is trust-based, not sandboxed — a user evaluating a Community/Unregistered-trust plugin is expected to read what it does before installing, so leaving capabilities implicit works against that model's own assumption. |
 
 ## Open Questions & Future Decisions
 
 ### Deferred
-1. Whether/when this leaf should promote to a sub-HLD (splitting Columns/Actions/Options/Details/Spectrogram/Help into their own child LLDs) — not yet triggered, since none of the six facets has outgrown what this shared leaf can hold coherently.
+1. Whether/when this leaf should promote to a sub-HLD (splitting each facet above into its own child LLD) — not yet triggered, since none of the facets has outgrown what this shared leaf can hold coherently.
 2. Six code comments elsewhere in the codebase cite `.omp/HANDOFF.md` (a gitignored, non-shipped file) for rationale that properly belongs in this LLD's or a sibling LLD's Decisions & Alternatives table — the user has confirmed these will be replaced with `@spec`/decision-doc references in a later phase rather than now.
 3. Track Health's composite score returns `None` for two different causes (nothing was measurable at all, or the file is File-Health-`Unplayable`) — checked against actual usage: in practice a `None` track_tier reaching this UI is always the `Unplayable` case; the "nothing measurable" path is a theoretical fallback that hasn't been observed. Dismissed for now — nothing in the current UI needs to disambiguate the two, and adding a distinction with no live case to justify it would be speculative.
 
 ## References
 
 - `docs/intent/file-health-scoring/file-health-scoring-design.md`, `docs/intent/track-health-scoring/track-health-scoring-design.md` — the two scores this leaf's UI surfaces.
+- `docs/high-level-design.md` § Security Model — the trust-based posture the Security Posture facet documents to users.
 - `.omp/HANDOFF.md` — pre-LID narrative for the column-rebuild race fix, the icon-alignment fix, and the Details-window/spectrogram history; not part of the arrow.
