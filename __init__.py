@@ -1484,8 +1484,21 @@ class DetailsPanel(QtWidgets.QDialog):
         def render() -> str | None:
             fd, path = tempfile.mkstemp(suffix='.png', prefix='file_health_spectrogram_')
             os.close(fd)
-            if analysis.generate_spectrogram(filename, path, ffmpeg_path=ffmpeg_path):
-                return path
+            try:
+                if analysis.generate_spectrogram(filename, path, ffmpeg_path=ffmpeg_path):
+                    return path
+            except BaseException:
+                # Clean up before re-raising — run_task's own error handling
+                # (see on_done below) already reports this to the user;
+                # this only prevents the temp PNG from leaking on an
+                # unexpected failure (e.g. the configured ffmpeg binary
+                # vanishing mid-session), same as the two normal-return
+                # paths already do.
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                raise
             try:
                 os.remove(path)
             except OSError:
