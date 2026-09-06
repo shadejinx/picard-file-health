@@ -81,6 +81,6 @@ graph TD
 
 ## References
 
-- ffmpeg filter documentation (`astats`, `volumedetect`, `ebur128`, `aphasemeter`, `silencedetect`, `showspectrumpic`) — the measurement primitives every check in `analysis.py` is built from.
-- Pleasurize Music Foundation "TT DR Meter" specification — the DR14 dynamic-range algorithm Track Health reimplements against ffmpeg's own `astats` output.
-- HydrogenAudio/Xiph published listening-test consensus bitrate thresholds — the basis for the below-transparency-bitrate informational note.
+- [ffmpeg filter documentation](https://ffmpeg.org/ffmpeg-filters.html) (`astats`, `volumedetect`, `ebur128`, `aphasemeter`, `silencedetect`, `showspectrumpic`) — the measurement primitives every check in `analysis.py` is built from.
+- [Pleasurize Music Foundation / MAAT DR Offline Meter](https://www.maat.digital/droffline/) — the DR14 dynamic-range algorithm Track Health reimplements against ffmpeg's own `astats` output.
+- [HydrogenAudio transparency listening-test consensus](https://wiki.hydrogenaudio.org/index.php?title=Transparency) — the basis for the below-transparency-bitrate informational note.
