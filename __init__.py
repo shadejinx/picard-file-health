@@ -1776,7 +1776,13 @@ class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         if level is None:
             return
         icon_size = 16
-        x = option.rect.x() + (option.rect.width() - icon_size) // 2
+        # Left-aligned to match the header label (Qt's default column
+        # text indent) rather than centered — centering looks fine at a
+        # column's default narrow width, but drifts oddly far from the
+        # "File Health"/"Track Health" header label once a user widens
+        # the column.
+        icon_left_padding = 4
+        x = option.rect.x() + icon_left_padding
         y = option.rect.y() + (option.rect.height() - icon_size) // 2
         match_icons[level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
 
