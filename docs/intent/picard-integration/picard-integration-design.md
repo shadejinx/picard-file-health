@@ -56,6 +56,7 @@ Scan results persist as `~health_*` Picard metadata fields on the file itself: t
 | Status icon alignment | Left-aligned, small fixed indent | Centered in the cell | Centering visibly drifted from the column's own left-aligned header label once a user widened the column — a common thing to do on this column given its tooltip content. |
 | Details-window re-scoring | Live recomputation from stored raw measurements against current slider settings | Redisplay the tier baked in at last scan time | Adjusting a slider should update the Details window immediately without forcing a re-scan — the raw measurements are already stored; only the threshold comparison needs to be redone. |
 | Help dialog content | 100% static HTML, zero dynamic interpolation | Interpolate the currently-selected file's own results into contextual help text | [inferred] Keeping this surface static makes it structurally immune to any HTML/injection concern a crafted file's tag content could otherwise raise, at the cost of the help text never being able to reference "your specific file's result" directly. |
+| Track Health Unplayable icon level | Reuse File Health's own level 0 | A distinct icon level for Track Health's Unplayable | Both represent the identical underlying fact (the file won't decode at all), not two different severities that merely look similar — a distinct level would visually imply a difference that doesn't exist. |
 
 ## Open Questions & Future Decisions
 

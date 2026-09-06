@@ -6,6 +6,7 @@
 - [x] **UI-COL-002**: When the plugin enables after Picard's own tree views already exist, the system shall retrigger a header rebuild on those views at staggered delays so the new columns become visible without requiring a Picard restart.
 - [x] **UI-COL-003**: The system shall left-align the tier status icon within its column cell to match the column header's own left-aligned label.
 - [x] **UI-COL-004**: The system shall HTML-escape every issue and note string before building the itemized-issues tooltip, since an issue's text may originate from a crafted tag's raw exception text and the tooltip renders as HTML.
+- [x] **UI-COL-005**: The system shall map the Track Health tier `Unplayable` to the same icon level and worst-of-all sort rank that the File Health column uses for `Unplayable`, so a Track Health scan that fails to decode is visually and sort-order indistinguishable in severity from a File Health decode failure.
 
 ## Actions
 

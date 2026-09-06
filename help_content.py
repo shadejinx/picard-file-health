@@ -70,10 +70,12 @@ channels, background noise floor, and dynamic range. It's always manual;
 right-click a matched track and choose <b>Scan Track Health...</b>, or use
 the buttons in the Details window. It never runs automatically, since it's
 meaningfully slower than File Health.</p>
-<p><b>Track Health tiers</b>: <b>Bad</b>, <b>OK</b>, <b>Good</b>,
-<b>Excellent</b>. There's no "Unplayable" tier here: if the file
-won't decode, that's already the File Health verdict, and there's nothing
-left for Track Health to measure.</p>
+<p><b>Track Health tiers</b>, worst to best: <b>Unplayable</b>, <b>Bad</b>,
+<b>OK</b>, <b>Good</b>, <b>Excellent</b>. Unplayable means the same thing
+it does for File Health &mdash; ffmpeg couldn't decode the file at all, so
+there was nothing left to measure &mdash; it's not a separate verdict,
+just the same underlying fact reported on both scans rather than leaving
+Track Health with no result at all.</p>
 <p>Every check contributes a 0-1 "defect score" (0 = comfortably clean, 1 =
 fails even the most lenient setting), weighted by how confidently that
 check's measurement maps to something actually audible, then averaged into

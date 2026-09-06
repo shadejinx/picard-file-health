@@ -4,7 +4,7 @@ The perceptual, fully slider-configurable Track Health score: a weighted composi
 
 ## Status
 
-**OK** — fully coherent as of 2026-09-06 (git SHA `037bb60151c2f35f47bcd4459119d319b178cd3a`). All 11 specs implemented and annotated at their code entry point; every spec has exactly one test citing it (18 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
+**OK** — fully coherent as of 2026-09-06 (git SHA `c31a7e90512bdc133211dd281f6b75274c1b1ac7`). All 11 specs implemented and annotated at their code entry point; every spec has exactly one test citing it (18 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
 
 ## References
 
