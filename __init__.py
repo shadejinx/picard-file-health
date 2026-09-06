@@ -183,106 +183,37 @@ class _SensitivitySlider(QtWidgets.QFrame):
 
 
 # Each gate's sensitivity slider has 10 hand-picked, non-linear steps —
-# grounded in analysis.py's own calibration data (see the cited margins
-# in each list) rather than an even split of the numeric range, since
-# the meaningful transitions in each measurement aren't evenly spaced
-# either. (value, hint) pairs, ordered lenient -> strict.
-
-_CLIP_STEPS: list[tuple[float, str]] = [
-    (25.0, "Only catches severe, obvious clipping — a wall of distortion."),
-    (20.0, "Catches heavy clipping most listeners would notice immediately."),
-    (16.0, "Catches clipping close to the mildest confirmed case we've measured."),
-    (8.0, "Catches moderate clipping — likely audible as harshness."),
-    (4.0, "Catches light clipping — may be audible on close listening."),
-    (2.0, "Catches subtle clipping most listeners wouldn't notice."),
-    (1.0, "Balanced default — catches genuine clipping without flagging clean loud audio."),
-    (0.5, "More sensitive than default — may flag some loud-but-clean audio."),
-    (0.1, "Very sensitive — likely to flag loud, dense mixes that aren't clipped."),
-    (0.05, "Extremely sensitive — expect false positives on loud modern masters."),
-]
-_CLIP_DEFAULT_INDEX = 6  # matches analysis.MIN_FLAT_FACTOR_FOR_CLIPPING (1.0)
-
-_TRUE_PEAK_STEPS: list[tuple[float, str]] = [
-    (3.0, "Only catches extreme overs — several dB past full volume."),
-    (2.0, "Catches clearly audible overshoot between samples."),
-    (1.5, "Catches overshoot well beyond what's normal for a finished master."),
-    (1.0, "Catches overshoot beyond typical headroom for a finished master."),
-    (0.8, "Slightly stricter than this measurement's own margin of error."),
-    (0.6, "Balanced default — just past this measurement's own margin of error."),
-    (0.4, "Tighter than this measurement can reliably tell apart — may flag otherwise-fine masters."),
-    (0.2, "Close to full volume — likely to flag normally loud tracks."),
-    (0.1, "Right at the edge of measurement noise — expect false positives."),
-    (0.0, "Flags anything technically over full volume, including measurement noise."),
-]
-_TRUE_PEAK_DEFAULT_INDEX = 5  # matches analysis.TRUE_PEAK_THRESHOLD_DBTP (0.6)
-
-_SPECTRAL_STEPS: list[tuple[float, str]] = [
-    (-90.0, "Only catches files with near-total silence up top — very few false positives."),
-    (-85.0, "Requires close to true silence above the cutoff."),
-    (-75.0, "Requires strong silence above the cutoff frequency."),
-    (-65.0, "Slightly more sensitive than default."),
-    (-60.0, "Balanced default — matches confirmed transcodes and fake hi-res files we've tested."),
-    (-55.0, "Slightly more likely to flag quiet, genuine high frequencies."),
-    (-50.0, "Moderately sensitive — may flag naturally soft treble."),
-    (-45.0, "Sensitive — may flag mellow or bass-heavy mixes."),
-    (-35.0, "Very sensitive — expect false positives on quiet acoustic material."),
-    (-30.0, "Extremely sensitive — likely to flag many legitimate files."),
-]
-_SPECTRAL_DEFAULT_INDEX = 4  # matches analysis.SPECTRAL_SILENCE_THRESHOLD_DB (-60)
-
-_PHASE_STEPS: list[tuple[float, str]] = [
-    (179.0, "Only catches near-perfect phase inversion."),
-    (177.0, "Requires almost exact inversion."),
-    (174.0, "Slightly more sensitive than ffmpeg's own default."),
-    (170.0, "ffmpeg's own default — catches clear phase problems."),
-    (165.0, "Slightly more sensitive — may catch wide stereo effects."),
-    (158.0, "Moderately sensitive — intentional stereo widening may trigger this."),
-    (150.0, "Sensitive — likely to flag wide mixes or reverb-heavy tracks."),
-    (140.0, "Very sensitive — many wide stereo mixes will trigger this."),
-    (120.0, "Extremely sensitive — most stereo content will trigger this."),
-    (95.0, "Nearly any decorrelated stereo signal will trigger this."),
-]
-_PHASE_DEFAULT_INDEX = 3  # matches analysis.PHASE_OUT_OF_PHASE_ANGLE_DEG (170)
-
-# Calibrated against this project's own 19-fixture real-track sample
-# (see analysis.NOISE_FLOOR_THRESHOLD_DB) rather than a much larger
-# library sweep — narrower validation than the other gates here, worth
-# widening if real-world use turns up false positives or misses.
-_NOISE_FLOOR_STEPS: list[tuple[float, str]] = [
-    (-20.0, "Only catches obviously loud background noise."),
-    (-25.0, "Catches clearly audible hiss or static."),
-    (-30.0, "Catches moderately audible background noise."),
-    (-35.0, "Balanced default — sits just above every clean file we measured."),
-    (-40.0, "Slightly more sensitive — may flag quiet room tone on live recordings."),
-    (-42.5, "Moderately sensitive — may flag reverb tails as noise."),
-    (-45.0, "Sensitive — may flag ordinary quiet passages on loud modern masters."),
-    (-47.5, "Very sensitive — expect false positives on many ordinary files."),
-    (-50.0, "Extremely sensitive — most ordinary masters will trigger this."),
-    (-55.0, "Nearly any measurable quiet-passage noise will trigger this."),
-]
-_NOISE_FLOOR_DEFAULT_INDEX = 3  # matches analysis.NOISE_FLOOR_THRESHOLD_DB (-35)
+# the real calibrated (value, hint) data and which position is the
+# empirically-calibrated default both live in analysis.py (see
+# analysis.sensitivity_step/sensitivity_default_position and
+# TH-SLIDER-001) — this module owns only the widget/position, never a
+# separate copy of the calibration data that could drift from
+# analysis.py's own.
+def _sensitivity_steps(check: str) -> list[tuple[float, str]]:
+    return [analysis.sensitivity_step(check, position) for position in range(1, 11)]
 
 
-# Shifts analysis.DR14_POOR_THRESHOLD/OK/GOOD/GREAT together (see
-# analysis.Thresholds.dr14_shift) rather than exposing four independent
-# band-boundary sliders — keeps the manual-documented relative spacing
-# between bands intact and just moves the whole scale's anchor point,
-# instead of risking the bands crossing each other or drifting apart
-# from what the TT DR Offline Meter manual actually documented.
-# Lenient (positive shift) -> strict (negative shift), matching every
-# other slider's left-to-right convention.
-_DR14_SHIFT_STEPS: list[tuple[float, str]] = [
-    (4.0, "Very lenient — a very squashed-sounding track (DR4) won't read as Poor."),
-    (3.0, "Lenient — a heavily squashed track (DR5) won't read as Poor."),
-    (2.0, "Somewhat lenient — a squashed track (DR6) won't read as Poor."),
-    (1.0, "Slightly lenient — a fairly squashed track (DR7) won't read as Poor."),
-    (0.0, "Balanced default — matches the official reference scale for this measurement."),
-    (-1.0, "Slightly stricter — needs a bit more dynamic range (DR9) to clear \"Poor\"."),
-    (-2.0, "Stricter — needs noticeably more dynamic range (DR10) to clear \"Poor\"."),
-    (-3.0, "Strict — needs a lot more dynamic range (DR11) to clear \"Poor\"."),
-    (-4.0, "Very strict — only tracks with very open dynamics (DR12+) avoid \"Poor\"."),
-]
-_DR14_SHIFT_DEFAULT_INDEX = 4  # matches analysis.Thresholds.dr14_shift default (0)
+def _sensitivity_default_index(check: str) -> int:
+    return analysis.sensitivity_default_position(check) - 1
+
+
+_CLIP_STEPS: list[tuple[float, str]] = _sensitivity_steps('clip')
+_CLIP_DEFAULT_INDEX = _sensitivity_default_index('clip')
+
+_TRUE_PEAK_STEPS: list[tuple[float, str]] = _sensitivity_steps('true_peak')
+_TRUE_PEAK_DEFAULT_INDEX = _sensitivity_default_index('true_peak')
+
+_SPECTRAL_STEPS: list[tuple[float, str]] = _sensitivity_steps('spectral')
+_SPECTRAL_DEFAULT_INDEX = _sensitivity_default_index('spectral')
+
+_PHASE_STEPS: list[tuple[float, str]] = _sensitivity_steps('phase')
+_PHASE_DEFAULT_INDEX = _sensitivity_default_index('phase')
+
+_NOISE_FLOOR_STEPS: list[tuple[float, str]] = _sensitivity_steps('noise_floor')
+_NOISE_FLOOR_DEFAULT_INDEX = _sensitivity_default_index('noise_floor')
+
+_DR14_SHIFT_STEPS: list[tuple[float, str]] = _sensitivity_steps('dr14_shift')
+_DR14_SHIFT_DEFAULT_INDEX = _sensitivity_default_index('dr14_shift')
 
 
 def _section_header(title: str) -> QtWidgets.QLabel:
@@ -323,6 +254,7 @@ def _thresholds_from_config(plugin_config) -> analysis.Thresholds:
     )
 
 
+# @spec UI-SPECTRO-001
 def _scan_file_health_one(filename: str, ffmpeg_path: str | None) -> dict[str, object]:
     """Runs on a background thread — the lightweight, structural-only
     decode (see analysis.analyze_file_health). No sliders/thresholds:
@@ -345,6 +277,7 @@ def _scan_file_health_one(filename: str, ffmpeg_path: str | None) -> dict[str, o
     }
 
 
+# @spec UI-SPECTRO-001
 def _scan_track_health_one(filename: str, ffmpeg_path: str | None, thresholds: analysis.Thresholds) -> dict[str, object]:
     """Runs on a background thread — the full perceptual decode (see
     analysis.analyze_track_health), independent of any File Health scan
@@ -471,6 +404,7 @@ def _restore_health_metadata_on_match(api: PluginApi, track: Track, file: File) 
 
 
 
+# @spec UI-ACTION-005, UI-ACTION-006, UI-META-001, UI-META-002
 def _file_health_scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
     """Runs back on the main thread once _scan_file_health_one completes."""
     if error is not None:
@@ -510,6 +444,7 @@ def _file_health_scan_finished(file: File, result: dict[str, object] | None, err
     file.update()
 
 
+# @spec UI-ACTION-005, UI-ACTION-006, UI-META-001, UI-META-002
 def _track_health_scan_finished(file: File, result: dict[str, object] | None, error: BaseException | None) -> None:
     """Runs back on the main thread once _scan_track_health_one completes."""
     if error is not None:
@@ -600,6 +535,7 @@ class HelpDialog(QtWidgets.QDialog):
         layout.addWidget(buttons)
 
 
+# @spec UI-OPTIONS-001, UI-OPTIONS-002
 class HealthOptionsPage(OptionsPage):
     NAME = "file_health"
     TITLE = "File Health"
@@ -780,6 +716,7 @@ class HealthOptionsPage(OptionsPage):
             self.ffmpeg_status_label.setText(f"Found: {resolved} (ffmpeg {found} — OK)")
 
 
+# @spec UI-ACTION-001
 class ScanFileHealthAction(BaseAction):
     """Right-click action that triggers the File Health scan on demand.
 
@@ -796,6 +733,7 @@ class ScanFileHealthAction(BaseAction):
 
     TITLE = "Scan File Health…"
 
+    # @spec UI-ACTION-003, UI-ACTION-004
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
         if not files:
@@ -814,6 +752,7 @@ class ScanFileHealthAction(BaseAction):
             )
 
 
+# @spec UI-ACTION-002
 class ScanTrackHealthAction(BaseAction):
     """Right-click action that triggers the Track Health scan on demand.
 
@@ -825,6 +764,7 @@ class ScanTrackHealthAction(BaseAction):
 
     TITLE = "Scan Track Health…"
 
+    # @spec UI-ACTION-003, UI-ACTION-004
     def callback(self, objs) -> None:
         files = list(iter_files_from_objects(objs))
         if not files:
@@ -976,6 +916,7 @@ def _is_live_context(file: File) -> bool:
     return '(live' in title or '[live' in title
 
 
+# @spec UI-DETAILS-001
 def _check_cells(file: File, thresholds: analysis.Thresholds) -> dict[str, tuple[str, str]]:
     """Every gate-check column's (state, tooltip) for one file, computed
     live from its stored raw measurements against the *current* slider
@@ -1269,6 +1210,7 @@ class DetailsPanel(QtWidgets.QDialog):
             self._select_file(selected)
         self._update_scan_button_states()
 
+    # @spec UI-DETAILS-002
     def _render_group(self, key: str, group: list[File]) -> None:
         header = QtWidgets.QTreeWidgetItem([key])
         header.setFirstColumnSpanned(True)
@@ -1451,6 +1393,7 @@ class DetailsPanel(QtWidgets.QDialog):
         tree.scrollToItem(ui_item)
         tree.setFocus()
 
+    # @spec UI-SPECTRO-002
     def _show_spectrogram(self) -> None:
         """Renders on a background thread (a real ffmpeg decode + image
         render, same as a scan) and opens a SpectrogramDialog on success.
@@ -1671,6 +1614,7 @@ class FileHealthProvider(ColumnValueProvider, DelegateProvider):
     def __init__(self) -> None:
         self._delegate_class = FileHealthColumnDelegate
 
+    # @spec UI-COL-001
     def evaluate(self, obj: Item) -> str:
         """Tier index as a string, for sorting worst-to-best."""
         column_method = getattr(obj, 'column', None)
@@ -1712,6 +1656,7 @@ class TrackHealthProvider(ColumnValueProvider, DelegateProvider):
     def __init__(self) -> None:
         self._delegate_class = TrackHealthColumnDelegate
 
+    # @spec UI-COL-001
     def evaluate(self, obj: Item) -> str:
         column_method = getattr(obj, 'column', None)
         if not callable(column_method):
@@ -1769,6 +1714,7 @@ class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
             return None
         return provider.get_health_info(obj)
 
+    # @spec UI-COL-003
     def paint(
         self,
         painter: QtGui.QPainter | None,
@@ -1800,6 +1746,7 @@ class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
         y = option.rect.y() + (option.rect.height() - icon_size) // 2
         match_icons[level].paint(painter, QtCore.QRect(x, y, icon_size, icon_size))
 
+    # @spec UI-COL-001, UI-COL-004
     def _format_tooltip(self, info: dict[str, object]) -> str:
         tier = info.get('tier')
         issues = info['issues']
@@ -1933,6 +1880,7 @@ def _install_delegate_on_live_views() -> None:
             set_delegate(index, delegate_class(widget))
 
 
+# @spec UI-COL-002
 def enable(api: PluginApi) -> None:
     """Called when the plugin is enabled."""
     api.logger.info("File Health enabled")

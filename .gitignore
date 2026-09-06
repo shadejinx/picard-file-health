@@ -13,3 +13,9 @@ dist/
 # Local test fixtures (real/copyrighted audio, machine-specific, never committed)
 assets/
 .DS_Store
+
+# Pre-LID session history, kept locally for archaeology, not part of the repo
+.omp/
+
+# Local tool state, machine-specific
+.pi/
