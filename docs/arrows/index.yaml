@@ -52,7 +52,7 @@ arrows:
     status: OK
     sampled: 2026-09-06
     audited: 2026-09-06
-    audited_sha: 037bb60151c2f35f47bcd4459119d319b178cd3a
+    audited_sha: 5e1a9941b2ca8133a1ebcc6cc217cf9082676678
     blocks: []
     blockedBy: [file-health-scoring, track-health-scoring]
     detail: picard-integration.md
