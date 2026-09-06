@@ -4,7 +4,7 @@ The pure-Python, ffmpeg-shelling measurement engine underneath both health score
 
 ## Status
 
-**OK** — fully coherent as of 2026-09-06 (git SHA `5b8d2e44cb567106c32d743bd49e25e17eba4583`). All 23 specs implemented and annotated at their code entry point; every spec has exactly one test citing it (28 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
+**OK** — fully coherent as of 2026-09-06 (git SHA `PLACEHOLDER`). All 25 specs implemented and annotated at their code entry point; every spec has exactly one test citing it (30 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
 
 ## References
 
@@ -15,10 +15,10 @@ The pure-Python, ffmpeg-shelling measurement engine underneath both health score
 - `docs/intent/analysis-engine/analysis-engine-design.md`
 
 ### EARS
-- `docs/intent/analysis-engine/analysis-engine-specs.md` (23 specs: `ENGINE-SUBPROC-*` ×5, `ENGINE-VERSION-*` ×4, `ENGINE-STDERR-*` ×4, `ENGINE-CORRUPT-*` ×4, `ENGINE-MERGE-001`, `ENGINE-DR14-*` ×3, `ENGINE-SPECTRO-*` ×2)
+- `docs/intent/analysis-engine/analysis-engine-specs.md` (25 specs: `ENGINE-SUBPROC-*` ×5, `ENGINE-VERSION-*` ×4, `ENGINE-STDERR-*` ×4, `ENGINE-CORRUPT-*` ×4, `ENGINE-MERGE-001`, `ENGINE-DR14-*` ×3, `ENGINE-SPECTRO-*` ×2, `ENGINE-SEC-*` ×2)
 
 ### Tests
-- `tests/test_analysis_engine.py` (28 tests)
+- `tests/test_analysis_engine.py` (30 tests)
 - `tests/test_fixtures_smoke.py` (8 tests — fixture-generation smoke tests, not spec-tracing; confirms conftest.py's synthetic fixtures produce the conditions the real spec tests assume)
 - `tests/conftest.py` (shared synthetic-audio fixtures)
 
@@ -49,12 +49,14 @@ The pure-Python, ffmpeg-shelling measurement engine underneath both health score
 | Merged-Decode Architecture | MERGE-001 | 1 | 0 | 0 |
 | Dynamic Range (DR14) | DR14-001 to 003 | 3 | 0 | 0 |
 | Spectrogram Rendering | SPECTRO-001, 002 | 2 | 0 | 0 |
+| Security Posture | SEC-001, 002 | 2 | 0 | 0 |
 
-**Summary:** 23 of 23 active specs implemented; 0 deferred; 0 gaps.
+**Summary:** 25 of 25 active specs implemented; 0 deferred; 0 gaps.
 
 ## Key Findings
 
-1. **Code-level `@spec` annotations now complete.** All 23 specs are annotated at their entry point in `analysis.py` (`_run_subprocess`, `_run_ffmpeg_filter`, `find_ffmpeg`, `check_ffmpeg_version`, `_filter_instance_output`, `_detect_corruption_signature`, `_parse_ebur128`, `_detect_size_mismatch`, `_detect_artwork_corruption`, `_detect_tag_structure_error`, `_run_merged_analysis`, `_compute_dr14`, `generate_spectrogram`). Tests fully cite every spec too.
+1. **Code-level `@spec` annotations now complete.** All 25 specs are annotated at their entry point in `analysis.py` (`_run_subprocess`, `_run_ffmpeg_filter`, `find_ffmpeg`, `check_ffmpeg_version`, `_filter_instance_output`, `_detect_corruption_signature`, `_parse_ebur128`, `_detect_size_mismatch`, `_detect_artwork_corruption`, `_detect_tag_structure_error`, `_run_merged_analysis`, `_compute_dr14`, `generate_spectrogram`). Tests fully cite every spec too.
+2. **`ENGINE-SEC-001`/`ENGINE-SEC-002` added this session**, cascaded from the HLD's new Security Model section: static guards confirming this engine never evaluates, executes, or deserializes anything constructed from a scanned file's own content, and never opens a network connection.
 
 ## Work Required
 

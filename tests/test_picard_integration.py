@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path
 
 import pytest
 
@@ -381,6 +382,19 @@ def _file_health_result(content_hash: str) -> dict[str, object]:
     }
 
 
+def _track_health_result(has_mains_hum: bool | None = None) -> dict[str, object]:
+    return {
+        'track_tier': 'Bad' if has_mains_hum else 'OK', 'track_flags': '', 'info': '',
+        'track_score': 0.4 if has_mains_hum else 0.2, 'content_hash': 'hash',
+        'bandwidth_hz': None, 'noise_floor_db': None, 'dr14': None, 'stereo_coherence': None,
+        'true_peak_dbtp': None, 'clipping_flat_factor': None, 'spectral_cutoff_db': None,
+        'hires_cutoff_db': None, 'is_out_of_phase': None, 'is_mono_duplicated': None,
+        'has_mains_hum': has_mains_hum, 'peak_db': None,
+        'codec_name': 'mp3', 'profile': None, 'bitrate_kbps': 256.0,
+        'sample_rate': 44100.0, 'channels': 2.0,
+    }
+
+
 def test_scan_result_is_persisted_onto_file_metadata_fields(plugin):
     """@spec UI-META-001"""
     file = FakeFile()
@@ -398,3 +412,48 @@ def test_content_hash_change_flags_changed_since_scan(plugin):
 
     plugin._file_health_scan_finished(file, _file_health_result('hashB'), None)
     assert file.metadata['~health_file_changed_since_scan'] == '1'
+
+
+# --- Security Posture ---
+
+def test_plugin_never_opens_a_network_connection(plugin):
+    """@spec UI-SEC-001
+
+    Static guard: nothing in __init__.py may import a networking
+    module — the plugin's every measurement is a local ffmpeg/ffprobe
+    invocation against a file already on disk.
+    """
+    import inspect
+    source = inspect.getsource(plugin)
+    for forbidden in ("import socket", "import urllib", "import requests", "import http.client", "import ftplib"):
+        assert forbidden not in source, f"found forbidden import {forbidden!r} in __init__.py"
+
+
+def test_readme_discloses_plugin_capabilities():
+    """@spec UI-SEC-002"""
+    readme = Path(__file__).resolve().parent.parent.joinpath('README.md').read_text(encoding='utf-8')
+    lower = readme.lower()
+    assert "no network" in lower or "network access" in lower
+    assert "ffmpeg" in lower and "subprocess" in lower
+    assert "temporary" in lower or "temp file" in lower
+
+
+# --- Details Window ---
+
+def test_details_window_matrix_includes_a_mains_hum_column(plugin):
+    """@spec UI-DETAILS-003"""
+    assert 'Mains Hum' in plugin._CHECK_COLUMNS
+
+
+def test_mains_hum_cell_fails_when_detected_and_passes_when_not(plugin, patch_tagger_instance):
+    """@spec UI-DETAILS-003"""
+    patch_tagger_instance()
+    hummy = FakeFile()
+    plugin._track_health_scan_finished(hummy, _track_health_result(has_mains_hum=True), None)
+    state, _ = plugin._check_cells(hummy, analysis.Thresholds())['Mains Hum']
+    assert state == 'fail'
+
+    clean = FakeFile()
+    plugin._track_health_scan_finished(clean, _track_health_result(has_mains_hum=False), None)
+    state, _ = plugin._check_cells(clean, analysis.Thresholds())['Mains Hum']
+    assert state == 'pass'

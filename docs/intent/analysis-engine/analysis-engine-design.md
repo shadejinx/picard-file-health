@@ -54,6 +54,10 @@ ffmpeg has no native DR14 filter; block-level RMS/Peak numbers from `astats` are
 
 On-demand only (a Details-window button), never part of a regular scan — a real extra decode-and-render cost distinct from every other measurement, which all reuse the one merged decode. Renders to a caller-supplied temp file path via ffmpeg's `showspectrumpic` filter; the caller owns the temp file's lifecycle (creation and cleanup on every exit path, including an unexpected exception mid-render — confirmed the ffmpeg-binary-vanishes-mid-call case specifically, since `find_ffmpeg` can raise before this function's own subprocess call ever runs, and the caller's cleanup path is exception-safe against that). A non-zero exit or a missing output file are both treated as failure regardless of what partial state ffmpeg may have left behind.
 
+## Security Posture
+
+No code in this engine ever evaluates, executes, or deserializes anything constructed from a scanned file's own content — every value read from ffmpeg/ffprobe output or `mutagen`'s tag parse is treated as inert data (a string, a number, a boolean), never as something to `eval`, `exec`, or unpickle. This engine also never opens a network connection of its own — every measurement is a local `ffmpeg`/`ffprobe` subprocess call against a file already on disk. This is the concrete implementation of the HLD's Security Model for the engine that touches untrusted file content directly; the shell-avoidance and stderr-scoping properties documented above are the other half of that same posture.
+
 ## Decisions & Alternatives
 
 | Decision | Chosen | Alternatives Considered | Rationale |
@@ -77,4 +81,5 @@ On-demand only (a Details-window button), never part of a regular scan — a rea
 
 - ffmpeg filter documentation: `astats`, `volumedetect`, `ebur128`, `aphasemeter`, `silencedetect`, `showspectrumpic`.
 - Pleasurize Music Foundation "TT DR Meter" specification.
+- `docs/high-level-design.md` § Security Model — the trust-based posture this engine's shell-avoidance, stderr-scoping, and no-dynamic-execution properties implement.
 - `.omp/HANDOFF.md` — pre-LID narrative history for this component's evolution (corruption-detection redesign, the `ebur128`/`loudnorm` swap, the stderr-spoofing hardening pass); not part of the arrow.

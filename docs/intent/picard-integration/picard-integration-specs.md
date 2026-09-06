@@ -26,6 +26,7 @@
 
 - [x] **UI-DETAILS-001**: The system shall recompute each Details-window matrix cell from stored raw measurements against the currently configured slider settings, not the tier recorded at scan time.
 - [x] **UI-DETAILS-002**: While a Details-window group's files are tied on both File Health and Track Health tier, the system shall visually distinguish the healthiest copy only when the ranking is unambiguous.
+- [x] **UI-DETAILS-003**: The system shall include a Details-window matrix column for every check that contributes to the Track Health composite score.
 
 ## Spectrogram Viewer
 
@@ -41,3 +42,8 @@
 
 - [x] **UI-META-001**: The system shall persist scan results as Picard file metadata fields so they survive a Picard restart.
 - [x] **UI-META-002**: The system shall compute a file's content hash from its raw bytes to detect whether the file changed since its last scan.
+
+## Security Posture
+
+- [x] **UI-SEC-001**: The system shall never open a network connection.
+- [x] **UI-SEC-002**: The system shall document, in the README, the local resources the plugin accesses (subprocess execution of ffmpeg/ffprobe, a temporary spectrogram file, file metadata writes) and that it makes no network connections — so a user evaluating a Community- or Unregistered-trust install can assess it before installing.

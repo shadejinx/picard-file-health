@@ -20,6 +20,10 @@ Both scores are calibrated against measurements from real music libraries, not s
 - Picard 3.0+ (Plugin API `3.0`)
 - [ffmpeg](https://ffmpeg.org/) on your `PATH`, or configured explicitly via the plugin's Options page
 
+## Security & Capabilities
+
+Picard's plugin model doesn't sandbox plugins — see [Picard's Plugin Security Model](https://github.com/metabrainz/picard/blob/master/docs/PLUGINSV3/SECURITY.md) — so here's exactly what File Health does on your machine, for evaluating before you install: it invokes your local `ffmpeg`/`ffprobe` binary as a subprocess to measure each file, writes one temporary file when you open the spectrogram viewer (deleted afterward), and writes scan results to the file's own Picard metadata. It makes **no network connections** — nothing is ever uploaded, and it doesn't check for updates itself. See [`docs/high-level-design.md` § Security Model](docs/high-level-design.md#security-model) for the full design rationale.
+
 ## Installation
 
 Once published to the [official plugin registry](https://github.com/metabrainz/picard-plugins-registry), install File Health directly from Picard's plugin manager (Options → Plugins).

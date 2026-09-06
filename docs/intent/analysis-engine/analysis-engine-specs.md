@@ -43,3 +43,8 @@
 
 - [x] **ENGINE-SPECTRO-001**: The system shall render a spectrogram image only on explicit request, never as part of a routine scan.
 - [x] **ENGINE-SPECTRO-002**: The system shall report spectrogram generation as failed when ffmpeg exits non-zero or the expected output file was not created.
+
+## Security Posture
+
+- [x] **ENGINE-SEC-001**: The system shall never evaluate, execute, or deserialize code constructed from file-derived or tag-derived data.
+- [x] **ENGINE-SEC-002**: The system shall never open a network connection.
