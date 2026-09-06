@@ -4,7 +4,7 @@ Every Picard-facing surface: the two tree columns and their icon-painting delega
 
 ## Status
 
-**OK** — fully coherent as of 2026-09-06 (git SHA `5e1a9941b2ca8133a1ebcc6cc217cf9082676678`; uncommitted working-tree changes beyond this SHA are included in this audit — see Key Findings). All 21 specs implemented and annotated at their code entry point; every spec has at least one test citing it (26 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
+**OK** — fully coherent as of 2026-09-06 (git SHA `c31a7e90512bdc133211dd281f6b75274c1b1ac7`). All 21 specs implemented and annotated at their code entry point; every spec has at least one test citing it (26 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
 
 ## References
 
