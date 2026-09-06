@@ -1487,17 +1487,33 @@ FILE_TIER_GREAT = "Good"
 FILE_TIER_EXCELLENT = "Excellent"
 
 
-def _compute_file_tier(file_issues: list[str], stream_info: StreamInfo) -> str:
+def _compute_file_tier(
+    structural_issues: list[str], tag_artwork_issues: list[str], stream_info: StreamInfo
+) -> str:
     """File Health has no sliders — see HANDOFF.md's "The redesign"
-    section — so this mapping is fixed rather than threshold-tunable:
-    any structural defect (audio/non-audio corruption, a malformed
-    tag/artwork structure, a Xing-header size mismatch) is `Bad`
-    regardless of bitrate; a structurally sound file is graded purely
-    by codec/bitrate using the same HydrogenAudio/Xiph transparency
-    consensus already validated for `_bitrate_transparency_note`.
+    section — so this mapping is fixed rather than threshold-tunable.
+
+    Audio corruption (a `bits_left` signature) and a Xing-header size
+    mismatch are real structural defects in the audio data itself —
+    forced `Bad` regardless of bitrate, since nothing short of
+    re-encoding from a clean source fixes them.
+
+    Malformed tag structure and corrupt embedded artwork are graded
+    more leniently: forced to `OK` rather than `Bad`, since Picard is
+    itself a tagging application built to rewrite exactly this kind of
+    metadata — re-saving the file (rewriting tags, re-adding artwork)
+    fixes both, unlike audio corruption. A file with unfixable
+    structural defects always wins the worse verdict when both kinds
+    of issue are present.
+
+    A file with neither kind of issue is graded purely by codec/bitrate
+    using the same HydrogenAudio/Xiph transparency consensus already
+    validated for `_bitrate_transparency_note`.
     """
-    if file_issues:
+    if structural_issues:
         return FILE_TIER_BAD
+    if tag_artwork_issues:
+        return FILE_TIER_GOOD  # FILE_TIER_GOOD's value is "OK" — see its definition
     codec_name = (stream_info.codec_name or '').lower()
     if _is_lossless_codec(codec_name):
         return FILE_TIER_EXCELLENT
@@ -1654,7 +1670,8 @@ def analyze_file_health(filename: str, ffmpeg_path: str | None = None) -> FileHe
             "(corrupt, truncated, unsupported format, or a decode timeout)",
         )
 
-    file_issues: list[str] = []
+    structural_issues: list[str] = []
+    tag_artwork_issues: list[str] = []
     info: list[str] = []
 
     bitrate_note = _bitrate_transparency_note(stream_info)
@@ -1666,33 +1683,39 @@ def analyze_file_health(filename: str, ffmpeg_path: str | None = None) -> FileHe
         # A real decoder-level structural signal (see CORRUPTION_BITS_
         # LEFT_PATTERN) — presence (not count, see that constant's own
         # calibration note) is the validated signal.
-        file_issues.append(corruption_note)
+        structural_issues.append(corruption_note)
 
     size_mismatch = _detect_size_mismatch(filename)
     if size_mismatch is not None:
         declared_mb = size_mismatch.declared_bytes / 1_000_000
         actual_mb = size_mismatch.actual_bytes / 1_000_000
         if size_mismatch.direction == 'extra_data':
-            file_issues.append(
+            structural_issues.append(
                 f"File has {size_mismatch.ratio * 100:.0f}% more audio data than the file itself "
                 f"expects ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB the file describes) — "
                 "extra data may have been added after the track originally ended"
             )
         else:
-            file_issues.append(
+            structural_issues.append(
                 f"File has {size_mismatch.ratio * 100:.0f}% less audio data than the file itself "
                 f"expects ({actual_mb:.1f}MB on disk vs. {declared_mb:.1f}MB the file describes) — "
                 "the file may have been cut short or altered after it was originally encoded"
             )
 
     if _detect_artwork_corruption(ffmpeg, ffprobe, filename):
-        file_issues.append("Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it")
+        tag_artwork_issues.append(
+            "Embedded artwork is corrupt — ffmpeg's own image decoder can't decode it "
+            "(re-adding artwork in Picard fixes this)"
+        )
 
     tag_error = _detect_tag_structure_error(filename)
     if tag_error is not None:
-        file_issues.append(f"Malformed tag structure — {tag_error}")
+        tag_artwork_issues.append(
+            f"Malformed tag structure — {tag_error} (re-saving the file in Picard fixes this)"
+        )
 
-    file_tier = _compute_file_tier(file_issues, stream_info)
+    file_issues = structural_issues + tag_artwork_issues
+    file_tier = _compute_file_tier(structural_issues, tag_artwork_issues, stream_info)
     return FileHealthResult(
         file_tier=file_tier,
         file_issues=file_issues,
