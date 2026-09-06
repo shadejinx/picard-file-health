@@ -12,6 +12,7 @@ analysis.py, via ffmpeg. See that module's docstring for exactly what's
 real vs. still-coarse-proxy vs. documented future work.
 """
 
+import html
 import os
 import tempfile
 from collections.abc import Callable
@@ -1802,14 +1803,22 @@ class _SingleHealthColumnDelegate(QtWidgets.QStyledItemDelegate):
                 "<div style='color:#b7950b;'>Audio content changed since last scan</div>"
             )
         if issues:
-            items = "".join(f"<li>{issue}</li>" for issue in issues)
+            # Escaped: most issue strings are this plugin's own fixed
+            # messages, but a malformed-tag-structure issue embeds
+            # mutagen's raw exception text (see
+            # analysis._detect_tag_structure_error), which can carry
+            # HTML-significant characters straight from a crafted tag
+            # frame — QToolTip.showText auto-detects and renders rich
+            # text, so an unescaped issue string could inject markup
+            # into this tooltip.
+            items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
             parts.append(f"<ul style='margin-left:-20px;'>{items}</ul>")
         elif tier is not None and not notes:
             parts.append("<br>No issues detected")
         if notes:
             # Informational only — doesn't affect the tier (e.g. mono
             # content in a stereo container isn't a defect, just a note).
-            note_items = "".join(f"<li>{note}</li>" for note in notes)
+            note_items = "".join(f"<li>{html.escape(note)}</li>" for note in notes)
             parts.append(
                 f"<div style='color:#7f8c8d;'>Note:<ul style='margin-left:-20px;'>{note_items}</ul></div>"
             )
