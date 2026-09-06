@@ -284,6 +284,36 @@ def test_unambiguous_winner_gets_bolded(plugin, qapp, patch_tagger_instance):
     assert not header.child(1).font(0).bold()
 
 
+def test_details_window_notes_include_file_health_issue_text(plugin, qapp, patch_tagger_instance):
+    """@spec UI-DETAILS-004"""
+    patch_tagger_instance()
+    panel = plugin.DetailsPanel(None, analysis.Thresholds())
+    file = FakeFile("/a.m4a", {
+        '~health_file_tier': 'OK',
+        '~health_file_flags': 'Malformed tag structure — re-saving fixes this',
+    })
+    panel.add_group("Group", [file])
+    header = panel.tree.topLevelItem(0)
+    notes_col = panel.tree.columnCount() - 1
+    notes_text = header.child(0).text(notes_col)
+    assert 'Malformed tag structure' in notes_text
+
+
+def test_details_window_notes_include_track_health_issue_text(plugin, qapp, patch_tagger_instance):
+    """@spec UI-DETAILS-004"""
+    patch_tagger_instance()
+    panel = plugin.DetailsPanel(None, analysis.Thresholds())
+    file = FakeFile("/a.mp3", {
+        '~health_track_tier': 'Bad',
+        '~health_track_flags': 'Possible mains hum (electrical buzz) at 50Hz',
+    })
+    panel.add_group("Group", [file])
+    header = panel.tree.topLevelItem(0)
+    notes_col = panel.tree.columnCount() - 1
+    notes_text = header.child(0).text(notes_col)
+    assert 'mains hum' in notes_text.lower()
+
+
 # --- Spectrogram Viewer ---
 
 def test_spectrogram_is_not_rendered_during_a_routine_scan(plugin, clean_wav, monkeypatch):

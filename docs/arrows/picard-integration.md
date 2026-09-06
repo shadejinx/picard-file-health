@@ -4,7 +4,7 @@ Every Picard-facing surface: the two tree columns and their icon-painting delega
 
 ## Status
 
-**OK** — fully coherent as of 2026-09-06 (git SHA `ae5109395a8d62ed6374bcf21c972e7b80a4d749`). All 24 specs implemented and annotated at their code entry point; every spec has at least one test citing it (31 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
+**OK** — fully coherent as of 2026-09-06 (git SHA `PLACEHOLDER`). All 25 specs implemented and annotated at their code entry point; every spec has at least one test citing it (33 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
 
 ## References
 
@@ -15,10 +15,10 @@ Every Picard-facing surface: the two tree columns and their icon-painting delega
 - `docs/intent/picard-integration/picard-integration-design.md`
 
 ### EARS
-- `docs/intent/picard-integration/picard-integration-specs.md` (24 specs: `UI-COL-*` ×5, `UI-ACTION-*` ×6, `UI-OPTIONS-*` ×2, `UI-DETAILS-*` ×3, `UI-SPECTRO-*` ×2, `UI-HELP-*` ×2, `UI-META-*` ×2, `UI-SEC-*` ×2)
+- `docs/intent/picard-integration/picard-integration-specs.md` (25 specs: `UI-COL-*` ×5, `UI-ACTION-*` ×6, `UI-OPTIONS-*` ×2, `UI-DETAILS-*` ×4, `UI-SPECTRO-*` ×2, `UI-HELP-*` ×2, `UI-META-*` ×2, `UI-SEC-*` ×2)
 
 ### Tests
-- `tests/test_picard_integration.py` (31 tests, using a duck-typed Qt/Picard harness — see Key Findings)
+- `tests/test_picard_integration.py` (33 tests, using a duck-typed Qt/Picard harness — see Key Findings)
 
 ### Code
 - `__init__.py` — columns (`FileHealthProvider`/`TrackHealthProvider`/`_SingleHealthColumnDelegate`), actions (`ScanFileHealthAction`/`ScanTrackHealthAction`/`ShowFileHealthDetailsAction`/`ShowAllFileHealthDetailsAction`), `HealthOptionsPage`, `DetailsPanel`, `SpectrogramDialog`, `HelpDialog`, `enable()`/`disable()`, metadata persistence (`_file_health_scan_finished`/`_track_health_scan_finished`/`_cache_health_metadata`/`_restore_health_metadata_on_match`)
@@ -32,7 +32,7 @@ Every Picard-facing surface: the two tree columns and their icon-painting delega
 1. Two sortable/filterable tree columns (icon + itemized-issues tooltip, HTML-escaped) registered on both file and album views, with a single synchronous reconciliation call at the end of `enable()` (header rebuild, delegate wiring, forced visibility) so already-open tree views pick up the new column without a Picard restart — see Key Findings for why this replaced an earlier staggered-retry approach.
 2. Five actions: File Health scan (everywhere), Track Health scan (matched tracks only), Details window (one file, or "all files" from the Tools menu) — every scan on a background thread via `run_task`, with pending-state and error-status-bar handling for a file removed from every visible tree mid-scan.
 3. `HealthOptionsPage` — ffmpeg path configuration (validated via `analysis.find_ffmpeg`/`get_ffmpeg_version` before display, not blindly accepted) and the six sensitivity sliders (widget/position only — see the `track-health-scoring` segment for who owns the real calibrated values).
-4. `DetailsPanel` — recomputes every stoplight cell live from stored raw measurements against the *current* slider settings, not the tier recorded at scan time, with one matrix column for every check that contributes to the Track Health composite score (including checks with no dedicated slider — Fake Hi-Res, Mains Hum); bolds an unambiguous per-group winner only when the File-then-Track tier ranking isn't tied.
+4. `DetailsPanel` — recomputes every stoplight cell live from stored raw measurements against the *current* slider settings, not the tier recorded at scan time, with one matrix column for every check that contributes to the Track Health composite score (including checks with no dedicated slider — Fake Hi-Res, Mains Hum); a Notes column carrying every itemized File Health/Track Health issue alongside informational notes — File Health has no check matrix, so Notes is the only place its issues are visible; bolds an unambiguous per-group winner only when the File-then-Track tier ranking isn't tied.
 5. `SpectrogramDialog` — renders on explicit request only, with the temp PNG deleted on every exit path (success, a failed render, and an unexpected exception).
 6. `HelpDialog`/`help_content.py` — entirely static HTML, no file/tag interpolation.
 7. `~health_*` metadata persistence, including a cross-match side-cache (`_health_metadata_cache`) that survives Picard's own `File.copy_metadata()` wipe on match/unmatch, and a content-hash comparison that flags "changed since scan" — including after a re-save that clears an OK-capped tag/artwork issue (now documented in the Help dialog — see Key Findings).
@@ -45,13 +45,13 @@ Every Picard-facing surface: the two tree columns and their icon-painting delega
 | Columns | COL-001 to 005 | 5 | 0 | 0 |
 | Actions | ACTION-001 to 006 | 6 | 0 | 0 |
 | Options Page | OPTIONS-001, 002 | 2 | 0 | 0 |
-| Details Window | DETAILS-001 to 003 | 3 | 0 | 0 |
+| Details Window | DETAILS-001 to 004 | 4 | 0 | 0 |
 | Spectrogram Viewer | SPECTRO-001, 002 | 2 | 0 | 0 |
 | Help Dialog | HELP-001, 002 | 2 | 0 | 0 |
 | Metadata Persistence | META-001, 002 | 2 | 0 | 0 |
 | Security Posture | SEC-001, 002 | 2 | 0 | 0 |
 
-**Summary:** 24 of 24 active specs implemented; 0 deferred; 0 gaps.
+**Summary:** 25 of 25 active specs implemented; 0 deferred; 0 gaps.
 
 ## Key Findings
 
@@ -62,6 +62,7 @@ Every Picard-facing surface: the two tree columns and their icon-painting delega
 5. **`UI-COL-002` reworked this session — the staggered-retry mechanism was solving a race that never existed.** A user report (Windows: columns unchecked by default, blank once manually checked, fixed only by "Restore default columns") led to tracing Picard's actual startup sequence (`tagger.py`, `plugin3/manager/lifecycle.py`): `MainWindow` and its tree views are always fully constructed before the plugin manager imports a plugin module or calls `enable()`, on every code path — there was never a timing window the four-attempt 0/250/1000/3000ms schedule needed to survive. The real gap was that no attempt ever forced column *visibility*, only the delegate — Picard's header-rebuild handler only reads back current Qt visibility, never applying `is_default`. Replaced the timer loop with one synchronous call at the end of `enable()` that rebuilds the header, wires the delegate, and force-shows both columns.
 6. **`UI-DETAILS-003` added and closed this session.** Investigating a real-library report (5 same-session-encoded files, one reading Track Health `Bad` with no visible reason in the Details window) found Mains Hum — a real, weighted, documented composite-score check — had no matrix column at all, and `_scan_track_health_one` didn't even forward `has_mains_hum` into persisted metadata for one to read back. The Details-window matrix previously only covered checks with a dedicated Options-page slider; fixed by adding the missing metadata field and a `Mains Hum` column, and by writing the spec to require every composite-score check to have a column regardless of slider ownership, closing the same class of gap for good.
 7. **`UI-SEC-001`/`UI-SEC-002` added this session**, cascaded from the HLD's new Security Model section: a static no-network-import guard, and a README capability-disclosure requirement for users evaluating a Community/Unregistered-trust install per Picard's own trust-based plugin security model.
+8. **`UI-DETAILS-004` added and closed this session.** Investigating a real-library report (a higher-bitrate AAC copy of a track rated File Health `OK` against a lower-bitrate MP3 copy rated `Good`, with "no apparent defect" in either) found the AAC file has a genuinely malformed MP4 freeform-atom (confirmed independently via mutagen's own traceback — the same defect class `ENGINE-CORRUPT-003`'s docstring already documented validating against a real 3 Doors Down M4A). The real bug wasn't the tier — it was that the Details window's Notes column never included `~health_file_flags`/`~health_track_flags` at all, only `~health_*_info`, so File Health issues (which have no check matrix of their own) were completely invisible in the one window built for side-by-side comparison. Fixed by including both flags fields in Notes.
 
 ## Work Required
 
