@@ -27,6 +27,7 @@
 - [x] **UI-DETAILS-001**: The system shall recompute each Details-window matrix cell from stored raw measurements against the currently configured slider settings, not the tier recorded at scan time.
 - [x] **UI-DETAILS-002**: While a Details-window group's files are tied on both File Health and Track Health tier, the system shall visually distinguish the healthiest copy only when the ranking is unambiguous.
 - [x] **UI-DETAILS-003**: The system shall include a Details-window matrix column for every check that contributes to the Track Health composite score.
+- [x] **UI-DETAILS-004**: The system shall include every File Health and Track Health itemized issue in the Details window's Notes column, not only informational notes that don't affect a tier.
 
 ## Spectrogram Viewer
 

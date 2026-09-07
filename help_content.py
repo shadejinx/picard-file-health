@@ -227,9 +227,11 @@ them on the Options page; HRS shares TRB's slider and HUM has no slider
 at all (see Checks).</td></tr>
 <tr><td>DYN</td><td>Dynamic Range band (Poor/Ok/Good/Great/Excellent,
 DR14's own rating scale).</td></tr>
-<tr><td>Notes</td><td>Every informational note (bitrate grading,
-bandwidth, stereo coherence, live-recording caveats, stale-scan
-warnings).</td></tr>
+<tr><td>Notes</td><td>Every itemized File Health and Track Health issue
+(the same text the tree column's own tooltip shows — decode/corruption/
+tag/artwork problems, fired perceptual checks), plus informational notes
+that don't affect a tier (bitrate grading, bandwidth, stereo coherence,
+live-recording caveats, stale-scan warnings).</td></tr>
 </table>
 <p><b>"Changed since last scan"</b> in Notes means the file's bytes are
 different from what they were the last time that scan ran &mdash; including

@@ -1292,6 +1292,9 @@ class DetailsPanel(QtWidgets.QDialog):
             col += 1
 
             info_parts = []
+            for flags_key in ('~health_file_flags', '~health_track_flags'):
+                if file.metadata[flags_key]:
+                    info_parts.extend(file.metadata[flags_key].split("; "))
             for info_key in ('~health_file_info', '~health_track_info'):
                 if file.metadata[info_key]:
                     info_parts.extend(file.metadata[info_key].split("; "))
