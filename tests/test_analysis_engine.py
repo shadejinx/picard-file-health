@@ -118,6 +118,152 @@ def test_no_explicit_path_searches_path_env(ffmpeg_path):
     assert found  # shutil.which succeeded
 
 
+# --- Windows ffmpeg Fallback Discovery ---
+
+def _make_windows_exe(path):
+    """Creates an empty file and marks it executable, mirroring what
+    `os.path.isfile`/`os.access(..., os.X_OK)` need to accept a
+    candidate — the same check `find_ffmpeg` already applies to an
+    explicit configured path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    path.chmod(0o755)
+
+
+def _windows_env(monkeypatch, tmp_path, **extra):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(analysis.shutil, "which", lambda name: None)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("SystemDrive", raising=False)
+    for key, value in extra.items():
+        monkeypatch.setenv(key, str(value))
+
+
+def test_windows_fallback_finds_winget_links_shim(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-005"""
+    local_appdata = tmp_path / "AppData" / "Local"
+    _windows_env(monkeypatch, tmp_path, LOCALAPPDATA=local_appdata)
+    shim = local_appdata / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+    _make_windows_exe(shim)
+    found = analysis.find_ffmpeg(None)
+    assert found == str(shim)
+
+
+def test_windows_fallback_finds_winget_package_glob(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-005"""
+    local_appdata = tmp_path / "AppData" / "Local"
+    _windows_env(monkeypatch, tmp_path, LOCALAPPDATA=local_appdata)
+    package = (
+        local_appdata / "Microsoft" / "WinGet" / "Packages"
+        / "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+        / "ffmpeg-7.0.2-full_build" / "bin" / "ffmpeg.exe"
+    )
+    _make_windows_exe(package)
+    found = analysis.find_ffmpeg(None)
+    assert found == str(package)
+
+
+def test_windows_fallback_prefers_newest_build_folder(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-006"""
+    local_appdata = tmp_path / "AppData" / "Local"
+    _windows_env(monkeypatch, tmp_path, LOCALAPPDATA=local_appdata)
+    package_root = (
+        local_appdata / "Microsoft" / "WinGet" / "Packages"
+        / "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+    )
+    older = package_root / "ffmpeg-6.1.1-full_build" / "bin" / "ffmpeg.exe"
+    newer = package_root / "ffmpeg-7.0.2-full_build" / "bin" / "ffmpeg.exe"
+    _make_windows_exe(older)
+    _make_windows_exe(newer)
+    # Force a modification-time ordering independent of filesystem
+    # creation order, since two files written in the same test can
+    # otherwise land within the same mtime tick.
+    import os
+    import time
+    now = time.time()
+    os.utime(older, (now - 100, now - 100))
+    os.utime(newer, (now, now))
+    found = analysis.find_ffmpeg(None)
+    assert found == str(newer)
+
+
+def test_windows_fallback_prefers_gyan_over_btbn(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-007"""
+    local_appdata = tmp_path / "AppData" / "Local"
+    _windows_env(monkeypatch, tmp_path, LOCALAPPDATA=local_appdata)
+    packages = local_appdata / "Microsoft" / "WinGet" / "Packages"
+    gyan = packages / "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe" / "ffmpeg-7.0.2-full_build" / "bin" / "ffmpeg.exe"
+    btbn = packages / "BtbN.FFmpeg.GPL_Microsoft.Winget.Source_8wekyb3d8bbwe" / "ffmpeg-master-latest-win64-gpl" / "bin" / "ffmpeg.exe"
+    _make_windows_exe(gyan)
+    _make_windows_exe(btbn)
+    found = analysis.find_ffmpeg(None)
+    assert found == str(gyan)
+
+
+def test_windows_fallback_finds_conventional_program_files(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-005"""
+    _windows_env(monkeypatch, tmp_path, **{"ProgramFiles": tmp_path / "Program Files"})
+    conventional = tmp_path / "Program Files" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    _make_windows_exe(conventional)
+    found = analysis.find_ffmpeg(None)
+    assert found == str(conventional)
+
+
+def test_windows_fallback_prioritizes_links_over_packages_over_conventional(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-005"""
+    local_appdata = tmp_path / "AppData" / "Local"
+    _windows_env(
+        monkeypatch, tmp_path,
+        LOCALAPPDATA=local_appdata,
+        **{"ProgramFiles": tmp_path / "Program Files"},
+    )
+    shim = local_appdata / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+    package = (
+        local_appdata / "Microsoft" / "WinGet" / "Packages"
+        / "Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+        / "ffmpeg-7.0.2-full_build" / "bin" / "ffmpeg.exe"
+    )
+    conventional = tmp_path / "Program Files" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    _make_windows_exe(shim)
+    _make_windows_exe(package)
+    _make_windows_exe(conventional)
+    found = analysis.find_ffmpeg(None)
+    assert found == str(shim)
+
+
+def test_windows_fallback_not_used_on_non_windows(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-008"""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(analysis.shutil, "which", lambda name: None)
+    local_appdata = tmp_path / "AppData" / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    shim = local_appdata / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+    _make_windows_exe(shim)
+    with pytest.raises(analysis.FfmpegNotFoundError):
+        analysis.find_ffmpeg(None)
+
+
+def test_windows_fallback_missing_localappdata_skips_winget_tiers(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-009"""
+    _windows_env(monkeypatch, tmp_path, **{"ProgramFiles": tmp_path / "Program Files"})
+    # LOCALAPPDATA deliberately left unset by _windows_env; only the
+    # conventional tier (env-independent of LOCALAPPDATA) is reachable.
+    conventional = tmp_path / "Program Files" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    _make_windows_exe(conventional)
+    found = analysis.find_ffmpeg(None)
+    assert found == str(conventional)
+
+
+def test_windows_fallback_raises_when_nothing_found(monkeypatch, tmp_path):
+    """@spec ENGINE-VERSION-005"""
+    _windows_env(monkeypatch, tmp_path, LOCALAPPDATA=tmp_path / "AppData" / "Local")
+    with pytest.raises(analysis.FfmpegNotFoundError):
+        analysis.find_ffmpeg(None)
+
+
 # --- Defensive stderr Parsing ---
 
 def test_filter_instance_output_rejects_marker_not_at_line_start():

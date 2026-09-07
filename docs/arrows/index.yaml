@@ -1,5 +1,5 @@
 schema_version: 2
-last_updated: 2026-09-06
+last_updated: 2026-09-07
 
 # Purely organizational — analysis-engine is the shared measurement layer;
 # file-health-scoring and track-health-scoring both consume it to produce a
@@ -17,9 +17,9 @@ taxonomy:
 arrows:
   analysis-engine:
     status: OK
-    sampled: 2026-09-06
-    audited: 2026-09-06
-    audited_sha: ae5109395a8d62ed6374bcf21c972e7b80a4d749
+    sampled: 2026-09-07
+    audited: 2026-09-07
+    audited_sha: 8c540e4f5ce93a83b003e5ec39b565d860dddc20
     blocks: [file-health-scoring, track-health-scoring]
     blockedBy: []
     detail: analysis-engine.md

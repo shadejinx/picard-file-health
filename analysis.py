@@ -56,6 +56,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import mutagen
 from mutagen.mp3 import (
@@ -670,22 +671,82 @@ class FfmpegVersionTooOldError(FfmpegNotFoundError):
     """
 
 
-# @spec ENGINE-VERSION-003, ENGINE-VERSION-004
+# WinGet publishes two ffmpeg packages; `Gyan.FFmpeg` is searched before
+# `BtbN.FFmpeg.GPL` when both are present — an arbitrary but stable
+# tie-break (the more widely recommended of the two), not a technical
+# requirement. See ENGINE-VERSION-005 through -009 and the "ffmpeg
+# Binary Discovery" LLD section for the full tier order and rationale.
+_WINGET_FFMPEG_PACKAGE_PREFIXES = ('Gyan.FFmpeg_', 'BtbN.FFmpeg.GPL_')
+
+
+def _find_ffmpeg_windows_fallback() -> str | None:
+    """Searches well-known Windows install locations once PATH search
+    has already failed. Every tier degrades silently on a missing
+    environment variable or a directory that doesn't exist — this
+    function never raises; `None` means "nothing found in any tier,"
+    which `find_ffmpeg` turns into the same FfmpegNotFoundError a
+    failed PATH search does.
+    """
+    local_appdata = os.environ.get('LOCALAPPDATA')
+    if local_appdata:
+        winget_root = Path(local_appdata) / 'Microsoft' / 'WinGet'
+
+        shim = winget_root / 'Links' / 'ffmpeg.exe'
+        if shim.is_file() and os.access(shim, os.X_OK):
+            return str(shim)
+
+        packages_root = winget_root / 'Packages'
+        if packages_root.is_dir():
+            for prefix in _WINGET_FFMPEG_PACKAGE_PREFIXES:
+                candidates = sorted(
+                    (
+                        candidate for candidate in packages_root.glob(f'{prefix}*/*/bin/ffmpeg.exe')
+                        if candidate.is_file() and os.access(candidate, os.X_OK)
+                    ),
+                    key=lambda candidate: candidate.stat().st_mtime,
+                    reverse=True,
+                )
+                if candidates:
+                    return str(candidates[0])
+
+    program_files = os.environ.get('ProgramFiles', r'C:\Program Files')
+    program_files_x86 = os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')
+    system_drive = os.environ.get('SystemDrive', 'C:')
+    for conventional in (
+        Path(program_files) / 'ffmpeg' / 'bin' / 'ffmpeg.exe',
+        Path(program_files_x86) / 'ffmpeg' / 'bin' / 'ffmpeg.exe',
+        Path(f'{system_drive}\\ffmpeg') / 'bin' / 'ffmpeg.exe',
+    ):
+        if conventional.is_file() and os.access(conventional, os.X_OK):
+            return str(conventional)
+
+    return None
+
+
+# @spec ENGINE-VERSION-003, ENGINE-VERSION-004, ENGINE-VERSION-005,
+# ENGINE-VERSION-006, ENGINE-VERSION-007, ENGINE-VERSION-008, ENGINE-VERSION-009
 def find_ffmpeg(explicit_path: str | None = None) -> str:
     """Locate the ffmpeg binary.
 
-    Checks an explicit configured path first (Options page), falls back to
-    searching PATH, same pattern Picard's own core uses for the AcoustID
-    fpcalc path.
+    Checks an explicit configured path first (Options page); otherwise
+    searches PATH, same pattern Picard's own core uses for the AcoustID
+    fpcalc path. If PATH search fails on Windows, falls back to
+    WinGet's known ffmpeg install locations and conventional
+    manual-install directories before giving up — see
+    `_find_ffmpeg_windows_fallback`.
     """
     if explicit_path:
         if os.path.isfile(explicit_path) and os.access(explicit_path, os.X_OK):
             return explicit_path
         raise FfmpegNotFoundError(f"Configured ffmpeg path is not an executable file: {explicit_path}")
     path = shutil.which('ffmpeg')
-    if not path:
-        raise FfmpegNotFoundError("ffmpeg not found on PATH")
-    return path
+    if path:
+        return path
+    if sys.platform == 'win32':
+        fallback = _find_ffmpeg_windows_fallback()
+        if fallback:
+            return fallback
+    raise FfmpegNotFoundError("ffmpeg not found on PATH")
 
 
 def _find_ffprobe(ffmpeg_path: str) -> str:
