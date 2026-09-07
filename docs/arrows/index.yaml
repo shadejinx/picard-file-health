@@ -19,7 +19,7 @@ arrows:
     status: OK
     sampled: 2026-09-07
     audited: 2026-09-07
-    audited_sha: c2f338ce7d56efa6ed2ded7c2b9a9c7f2b154649
+    audited_sha: 8c540e4f5ce93a83b003e5ec39b565d860dddc20
     blocks: [file-health-scoring, track-health-scoring]
     blockedBy: []
     detail: analysis-engine.md

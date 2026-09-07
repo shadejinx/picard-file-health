@@ -4,7 +4,7 @@ The pure-Python, ffmpeg-shelling measurement engine underneath both health score
 
 ## Status
 
-**OK** — fully coherent as of 2026-09-07 (git SHA `c2f338ce7d56efa6ed2ded7c2b9a9c7f2b154649`). All 30 specs implemented and annotated at their code entry point; every spec has at least one test citing it (39 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
+**OK** — fully coherent as of 2026-09-07 (git SHA `8c540e4f5ce93a83b003e5ec39b565d860dddc20`). All 30 specs implemented and annotated at their code entry point; every spec has at least one test citing it (39 tests total, some specs covered by more than one). No coverage gaps, no orphan or reverse-orphan spec IDs found.
 
 ## References
 
