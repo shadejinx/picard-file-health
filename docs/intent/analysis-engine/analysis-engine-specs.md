@@ -14,6 +14,11 @@
 - [x] **ENGINE-VERSION-002**: If ffmpeg's version string cannot be parsed as a standard numeric release, then the system shall treat the binary as acceptable rather than rejecting it.
 - [x] **ENGINE-VERSION-003**: If a user-configured ffmpeg path is not an existing, executable file, then the system shall reject that configuration rather than attempting to invoke it.
 - [x] **ENGINE-VERSION-004**: Where no explicit ffmpeg path is configured, the system shall search the operating system's `PATH` for the binary.
+- [x] **ENGINE-VERSION-005**: Where no explicit ffmpeg path is configured and the binary is not found via `PATH` search, on Windows the system shall additionally search WinGet's shim directory, WinGet's known ffmpeg package installation directories, and conventional manual-install locations before treating ffmpeg as not found.
+- [x] **ENGINE-VERSION-006**: Where the Windows fallback search finds more than one version-suffixed build folder for the same WinGet package, the system shall select the binary from the most recently modified folder.
+- [x] **ENGINE-VERSION-007**: Where both known WinGet ffmpeg packages have an installation directory present, the system shall search the `Gyan.FFmpeg` package's directory before the `BtbN.FFmpeg.GPL` package's directory.
+- [x] **ENGINE-VERSION-008**: On a non-Windows platform, the system shall not perform the Windows fallback search.
+- [x] **ENGINE-VERSION-009**: If an environment variable a Windows fallback search tier depends on is not set, the system shall skip that tier without raising an error.
 
 ## Defensive stderr Parsing
 
