@@ -163,14 +163,49 @@ def test_file_health_action_registered_for_files_clusters_and_tracks(plugin, pat
     assert plugin.ScanFileHealthAction in api.registered_track_actions
 
 
-def test_track_health_action_registered_only_for_matched_tracks(plugin, patch_tagger_instance):
+def test_track_health_action_registered_for_tracks_and_files_not_clusters(plugin, patch_tagger_instance):
     """@spec UI-ACTION-002"""
     patch_tagger_instance()
     api = FakePluginApi()
     plugin.enable(api)
     assert plugin.ScanTrackHealthAction in api.registered_track_actions
-    assert plugin.ScanTrackHealthAction not in api.registered_file_actions
+    assert plugin.ScanTrackHealthAction in api.registered_file_actions
     assert plugin.ScanTrackHealthAction not in api.registered_cluster_actions
+
+
+def test_track_health_scan_skips_files_not_matched_to_a_track(plugin, qapp, patch_tagger_instance, monkeypatch):
+    """@spec UI-ACTION-002"""
+    patch_tagger_instance()
+    monkeypatch.setattr(plugin, 'iter_files_from_objects', lambda objs: objs)
+    scheduled = []
+    monkeypatch.setattr(plugin, 'run_task', lambda work, done: scheduled.append(work))
+
+    class FakeTrack(plugin.Track):
+        def __init__(self):
+            pass
+
+    monkeypatch.setattr(plugin, 'Track', FakeTrack)
+    matched = FakeFile("/matched.mp3")
+    matched.parent_item = FakeTrack()
+    unmatched = FakeFile("/unmatched.mp3")
+    unmatched.parent_item = None
+    api = FakePluginApi()
+    plugin.enable(api)
+    action = plugin.ScanTrackHealthAction()
+    action.api = api
+    action.callback([matched, unmatched])
+    assert matched.pending is True
+    assert unmatched.pending is False
+    assert len(scheduled) == 1
+
+
+def test_details_action_registered_for_tracks_and_files(plugin, patch_tagger_instance):
+    """@spec UI-ACTION-007"""
+    patch_tagger_instance()
+    api = FakePluginApi()
+    plugin.enable(api)
+    assert plugin.ShowFileHealthDetailsAction in api.registered_track_actions
+    assert plugin.ShowFileHealthDetailsAction in api.registered_file_actions
 
 
 def test_scan_action_schedules_via_run_task_instead_of_running_inline(plugin, patch_tagger_instance, monkeypatch):

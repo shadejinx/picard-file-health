@@ -11,11 +11,12 @@
 ## Actions
 
 - [x] **UI-ACTION-001**: The system shall provide a File Health scan action available on unmatched files, clusters, and matched tracks.
-- [x] **UI-ACTION-002**: The system shall provide a Track Health scan action available only on matched tracks.
+- [x] **UI-ACTION-002**: The system shall provide a Track Health scan action reachable by right-clicking a Track node or a linked File node, that scans only files matched to a track, silently skipping any unmatched file present in the same selection.
 - [x] **UI-ACTION-003**: The system shall run every scan on a background thread, never blocking the UI thread.
 - [x] **UI-ACTION-004**: While a file's scan is in progress, the system shall mark that file pending.
 - [x] **UI-ACTION-005**: When a scan completes with an unhandled error, the system shall clear the file's pending state and display a status-bar message naming the failure.
 - [x] **UI-ACTION-006**: If a File Health or Track Health scan completes after its file has been removed from every visible tree, then the system shall not raise an error from the completion callback.
+- [x] **UI-ACTION-007**: The system shall make the File Health Details window reachable by right-clicking a Track node or a linked File node, not only via the Tools-menu "scan everything" action.
 
 ## Options Page
 
