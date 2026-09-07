@@ -781,17 +781,24 @@ class ScanFileHealthAction(BaseAction):
 class ScanTrackHealthAction(BaseAction):
     """Right-click action that triggers the Track Health scan on demand.
 
-    Registered as a track-only action (see enable()) — Track Health's
-    heavier perceptual scan is a right-side-only concern, evaluated in
-    the context of a matched recording, unlike File Health's file-level
-    structural check which applies everywhere.
+    Registered as both a track and a file action (see enable()) — a
+    track with more than one linked file (duplicate candidates matched
+    to the same recording) renders in Picard's own tree as a Track
+    parent with the linked files as separate File child nodes, not as
+    one Track node; right-clicking one of those File children is the
+    only way to reach that content, so a track-only registration made
+    Track Health completely unreachable for it. The callback still
+    only scans files actually matched to a track — Track Health's
+    heavier perceptual scan is evaluated in the context of a matched
+    recording, unlike File Health's file-level structural check which
+    applies everywhere.
     """
 
     TITLE = "Scan Track Health…"
 
     # @spec UI-ACTION-003, UI-ACTION-004
     def callback(self, objs) -> None:
-        files = list(iter_files_from_objects(objs))
+        files = [f for f in iter_files_from_objects(objs) if isinstance(f.parent_item, Track)]
         if not files:
             return
         tagger_instance().window.set_statusbar_message(
@@ -1591,10 +1598,14 @@ def _open_details_panel(
 class ShowFileHealthDetailsAction(BaseAction):
     """Right-click action that opens the File Health Details window for
     the current selection — any files, not just ones with a confirmed
-    duplicate. Files matched to the same Track are still grouped
-    together for side-by-side comparison (Picard's own matching
-    decision, not our own tag comparison); everything else gets its own
-    row.
+    duplicate. Registered as both a track and a file action (see
+    enable()) — a track with more than one linked file renders as
+    separate File child nodes rather than one Track node, and
+    track-only registration would make this launcher unreachable for
+    those files, the same reachability gap ScanTrackHealthAction has.
+    Files matched to the same Track are still grouped together for
+    side-by-side comparison (Picard's own matching decision, not our
+    own tag comparison); everything else gets its own row.
 
     Doesn't declare a hard winner in the results — only bolds whichever
     file scored higher within its group (File Health tier first, then
@@ -2010,9 +2021,15 @@ def enable(api: PluginApi) -> None:
     api.register_cluster_action(ScanFileHealthAction)
     api.register_track_action(ScanFileHealthAction)
 
-    # Track Health and Details: right side (matched-track context) only.
+    # Track Health and Details: matched content only. Registered on both
+    # track and file actions — a track with more than one linked file
+    # renders as File child nodes, not one Track node, and those are
+    # only reachable via the file-action registration (see
+    # ScanTrackHealthAction's docstring).
     api.register_track_action(ScanTrackHealthAction)
+    api.register_file_action(ScanTrackHealthAction)
     api.register_track_action(ShowFileHealthDetailsAction)
+    api.register_file_action(ShowFileHealthDetailsAction)
     api.register_tools_menu_action(ShowAllFileHealthDetailsAction)
 
     # Rebuild any already-open tree view's header (column count + labels),

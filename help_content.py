@@ -67,7 +67,7 @@ Why tab): at or above it is Good, below it is OK.</li>
 <p>A heavier scan: a full decode plus several ffmpeg audio-analysis passes
 measuring clipping, inter-sample peaks, spectral cutoff, out-of-phase
 channels, background noise floor, and dynamic range. It's always manual;
-right-click a matched track and choose <b>Scan Track Health...</b>, or use
+right-click a matched track (or one of its linked files) and choose <b>Scan Track Health...</b>, or use
 the buttons in the Details window. It never runs automatically, since it's
 meaningfully slower than File Health.</p>
 <p><b>Track Health tiers</b>, worst to best: <b>Unplayable</b>, <b>Bad</b>,
@@ -207,7 +207,7 @@ not necessarily damage or a lossy transcode.</li>
 
 _DETAILS_HTML = """
 <h2>Opening it</h2>
-<p>Right-click a matched track and choose <b>File Health Details...</b> for
+<p>Right-click a matched track (or one of its linked files) and choose <b>File Health Details...</b> for
 just that selection, or use the Tools menu's <b>Show File Health Details
 for All Files</b> to see everything currently loaded in Picard at once.</p>
 
